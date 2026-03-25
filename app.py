@@ -4,9 +4,9 @@ import numpy as np
 import plotly.graph_objects as go
 import io
 
-# --- KONFIGURACJA ---
-st.set_page_config(page_title="Kalkulator PV B2B - Analiza Dobowa", layout="wide")
-st.title("⚡ Analiza PV B2B z Dobową Opłatą Mocową (Netto 2026)")
+# --- KONFIGURACJA STRONY ---
+st.set_page_config(page_title="Kalkulator PV B2B - Final Fix", layout="wide")
+st.title("⚡ Analiza PV B2B: Bilans Miesięczny i Opłata Mocowa (Netto 2026)")
 
 # --- BAZA DANYCH OSD ---
 WSPOLNE_NETTO = 0.04346 
@@ -25,7 +25,7 @@ data_type = st.sidebar.radio("Tryb danych:", ["15-minutowe", "Godzinowe"])
 osd_choice = st.sidebar.selectbox("Operator OSD", list(osd_data.keys()))
 taryfa_choice = st.sidebar.selectbox("Taryfa", ["B21", "B22", "B23"])
 cena_mwh = st.sidebar.number_input("Cena energii czynnej (PLN/MWh netto)", value=485.0)
-moc_pv = st.sidebar.number_input("Moc PV (kWp)", value=500.0) # Twoje 500kWp
+moc_pv = st.sidebar.number_input("Moc PV (kWp)", value=500.0) 
 uzysk = st.sidebar.number_input("Uzysk roczny (kWh/kWp)", value=1000.0)
 
 uploaded_file = st.sidebar.file_uploader("Wgraj dane klienta (CSV)", type=['csv'])
@@ -51,13 +51,13 @@ if df is None:
     dates = pd.date_range("2026-01-01", periods=8760, freq="h")
     df = pd.DataFrame({"Timestamp": dates, "Pobór": np.random.uniform(100, 300, 8760)})
 
-# --- OBLICZENIA DOBOWE ---
+# --- OBLICZENIA BILANSU ---
 df['Data'] = df['Timestamp'].dt.date
 df['Godzina'] = df['Timestamp'].dt.hour
 df['Roboczy'] = df['Timestamp'].dt.weekday < 5
 df['Miesiąc'] = df['Timestamp'].dt.strftime('%m - %b')
 
-# Generacja PV (uproszczona sezonowość)
+# Generacja PV (sezonowość)
 sin_p = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12))
 weights = {1: 0.3, 2: 0.5, 3: 0.9, 4: 1.2, 5: 1.5, 6: 1.6, 7: 1.6, 8: 1.4, 9: 1.0, 10: 0.6, 11: 0.3, 12: 0.2}
 df['Waga'] = df['Timestamp'].dt.month.map(weights)
@@ -65,36 +65,39 @@ df['Gen_Raw'] = sin_p * df['Waga']
 total_gen_raw = df['Gen_Raw'].sum()
 df['Generacja_PV'] = (df['Gen_Raw'] / total_gen_raw) * (moc_pv * uzysk * (len(df)/8760)) if total_gen_raw > 0 else 0
 
-# Bilansowanie "netto" (autokonsumpcja)
 df['Autokonsumpcja'] = np.minimum(df['Pobór'], df['Generacja_PV'])
-df['Nowy_Pobór'] = df['Pobór'] - df['Autokonsumpcja']
+df['Nowy_Pobór'] = np.maximum(0, df['Pobór'] - df['Autokonsumpcja'])
 df['Eksport'] = np.maximum(0, df['Generacja_PV'] - df['Pobór'])
 
-# KATEGORIE MOCOWE (LOGIKA DOBOWA)
+# --- OPŁATA MOCOWA (LOGIKA DOBOWA Z ZABEZPIECZENIEM) ---
 df['Is_Szczyt_Mocowy'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy']
 
-def calculate_daily_mocowa(sub_df):
+def calculate_daily_mocowa_safe(sub_df):
     szczyt = sub_df[sub_df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
     poza_szczyt = sub_df[~sub_df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
     total = szczyt + poza_szczyt
     
-    if total <= 0: return 0, 1.0 # Brak poboru = brak opłaty
+    # Bezpiecznik: jeśli total jest 0 (klient nie pobiera nic z sieci), stawka mnożnikowa nie ma znaczenia, 
+    # ale przyjmujemy K1 (najniższą), aby uniknąć ZeroDivisionError
+    if total <= 1e-6: 
+        return 0.0, 0.17 
     
     delta = (szczyt - poza_szczyt) / total
-    # Kategoria dobowa
+    
     if delta < 0.05: mn = 0.17
     elif delta < 0.10: mn = 0.50
     elif delta < 0.15: mn = 0.83
     else: mn = 1.0
+    
     return szczyt * OPLATA_MOCOWA_STAWKA * mn, mn
 
-# Aplikujemy funkcję do każdego dnia z osobna
-daily_stats = df.groupby('Data').apply(lambda x: pd.Series(calculate_daily_mocowa(x)))
+# Obliczenia dla Nowego Poboru (Po PV)
+daily_stats = df.groupby('Data').apply(lambda x: pd.Series(calculate_daily_mocowa_safe(x)))
 daily_stats.columns = ['Koszt_Mocowy', 'Mnożnik']
 total_mocowa_po = daily_stats['Koszt_Mocowy'].sum()
 
-# To samo dla poboru PRZED PV
-daily_stats_pre = df.groupby('Data').apply(lambda x: pd.Series(calculate_daily_mocowa(x.assign(Nowy_Pobór=x['Pobór']))))
+# Obliczenia dla Poboru Pierwotnego (Przed PV)
+daily_stats_pre = df.groupby('Data').apply(lambda x: pd.Series(calculate_daily_mocowa_safe(x.assign(Nowy_Pobór=x['Pobór']))))
 total_mocowa_przed = daily_stats_pre[0].sum()
 
 # --- FINANSE POZOSTAŁE ---
@@ -117,8 +120,8 @@ def calc_base(col):
 e_p, d_p = calc_base('Pobór')
 e_n, d_n = calc_base('Nowy_Pobór')
 
-# --- PREZENTACJA ---
-st.header(f"📈 Bilans Energii i Oszczędności: {osd_choice} {taryfa_choice}")
+# --- WYŚWIETLANIE ---
+st.header(f"📊 Analiza Miesięczna i Finansowa: {osd_choice} {taryfa_choice}")
 
 # Wykres Miesięczny
 m_df = df.groupby('Miesiąc')[['Pobór', 'Autokonsumpcja', 'Nowy_Pobór', 'Eksport']].sum().reset_index()
@@ -141,14 +144,12 @@ st.table(pd.DataFrame({
 
 # Analiza K1-K4
 st.markdown("---")
-st.subheader("🧐 Czy klient faktycznie „ucieka” w tańszą kategorię mocową?")
-st.write("Dzięki 500 kWp, w słoneczne dni pobór szczytowy spada niemal do zera, co drastycznie zmienia współczynnik L.")
+st.subheader("🧐 Rozkład kategorii mocowych w skali roku")
+st.write("Tabela pokazuje, przez jaki procent dni w danym miesiącu klient wpada w konkretną kategorię ulgi (K1=17%, K4=100% stawki).")
 
 hist_data = pd.DataFrame({
     "Miesiąc": df['Timestamp'].dt.month,
     "Mnożnik": daily_stats['Mnożnik'].values
 }).groupby('Miesiąc')['Mnożnik'].value_counts(normalize=True).unstack().fillna(0) * 100
 
-st.write("**Procentowy udział kategorii mocowych w poszczególnych miesiącach (PO PV):**")
-st.write("Wskazuje, przez ile dni w miesiącu klient płacił daną stawkę (K1=17%, K4=100%).")
 st.table(hist_data.style.format("{:.1f}%"))
