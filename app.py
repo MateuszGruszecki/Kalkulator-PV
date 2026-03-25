@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import io
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Kalkulator PV B2B", layout="wide")
+st.set_page_config(page_title="Kalkulator PV B2B - Nowy Profil", layout="wide")
 st.title("⚡ Profesjonalna Analiza PV dla Biznesu (Netto 2026)")
 
 # --- BAZA DANYCH OSD (Netto 2026) ---
@@ -127,9 +127,8 @@ def gen_moc_table_clean(sz, mn_act):
         "Stawka [zł/kWh]": [OPLATA_MOCOWA_NETTO * m for m in mns],
         "Roczny Koszt [PLN]": [sz * OPLATA_MOCOWA_NETTO * m for m in mns]
     })
-    # Wyróżnienie tylko pogrubieniem i delikatnym obramowaniem zamiast jaskrawego koloru
     return df_m.style.apply(lambda x: [
-        'font-weight: bold; border: 1px solid #ccc' if mn_act == mns[x.name] else '' for _ in x
+        'font-weight: bold; border: 1px solid #ccc; background-color: #f9f9f9' if mn_act == mns[x.name] else '' for _ in x
     ], axis=1).format({"Stawka [zł/kWh]": "{:.4f}", "Roczny Koszt [PLN]": "{:,.2f}"})
 
 with col_m1:
@@ -140,11 +139,39 @@ with col_m2:
     st.write(f"**PO PV** (Mocowy: {sz_n/1000:,.2f} MWh)")
     st.table(gen_moc_table_clean(sz_n, mn_n))
 
+# --- MODYFIKACJA WYKRESU ---
 st.markdown("---")
-avg = df.groupby('Godzina')[['Pobór', 'Autokonsumpcja', 'Generacja_PV', 'Nadwyżka_PV']].mean().reindex(range(24)).fillna(0)
+st.subheader("📈 Profil poboru i produkcji energii")
+avg = df.groupby('Godzina')[['Pobór', 'Nowy_Pobór', 'Autokonsumpcja', 'Generacja_PV', 'Nadwyżka_PV']].mean().reindex(range(24)).fillna(0)
+
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=list(range(24)), y=avg['Pobór'], name="Pobór przed PV", line=dict(color='red', width=2)))
-fig.add_trace(go.Bar(x=list(range(24)), y=avg['Autokonsumpcja'], name="Autokonsumpcja", marker_color='green'))
-fig.add_trace(go.Bar(x=list(range(24)), y=avg['Nadwyżka_PV'], name="Nadwyżka (eksport)", marker_color='rgba(255, 165, 0, 0.4)'))
-fig.update_layout(title="Średni profil dobowy (kWh) - Bilans energii", barmode='stack', template="plotly_white", xaxis=dict(dtick=1))
+
+# 1. Oryginalny pobór (Linia czerwona)
+fig.add_trace(go.Scatter(x=list(range(24)), y=avg['Pobór'], 
+                         name="Pobór przed PV (oryginalny)", 
+                         line=dict(color='#E74C3C', width=2)))
+
+# 2. Pobór po zainstalowaniu PV (Linia niebieska przerywana) - TO O CO PROSIŁEŚ
+fig.add_trace(go.Scatter(x=list(range(24)), y=avg['Nowy_Pobór'], 
+                         name="Pobór po PV (widoczny dla sieci)", 
+                         line=dict(color='#3498DB', width=3, dash='dash')))
+
+# 3. Autokonsumpcja (Słupki zielone)
+fig.add_trace(go.Bar(x=list(range(24)), y=avg['Autokonsumpcja'], 
+                     name="Autokonsumpcja (oszczędność)", 
+                     marker_color='rgba(46, 204, 113, 0.7)'))
+
+# 4. Nadwyżka (Słupki pomarańczowe)
+fig.add_trace(go.Bar(x=list(range(24)), y=avg['Nadwyżka_PV'], 
+                     name="Nadwyżka (eksport do sieci)", 
+                     marker_color='rgba(243, 156, 18, 0.4)'))
+
+fig.update_layout(
+    title="Średniodobowy bilans energii (kWh)",
+    barmode='stack',
+    template="plotly_white",
+    xaxis=dict(dtick=1, title="Godzina"),
+    yaxis=dict(title="Energia [kWh]"),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+)
 st.plotly_chart(fig, use_container_width=True)
