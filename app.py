@@ -199,7 +199,7 @@ def stworz_raport_pdf():
     # Używamy wbudowanej czcionki Arial - NIE WYMAGA ŻADNYCH PLIKÓW!
     pdf.set_font("Arial", "", 12)
     
-    # Nagłówek (dodajemy "B" dla pogrubienia)
+    # Nagłówek
     pdf.set_font("Arial", "B", 18)
     pdf.cell(200, 10, txt=formatuj_tekst("Raport Oplacalnosci Instalacji PV (B2B)"), ln=True, align='C')
     pdf.ln(10)
@@ -241,11 +241,11 @@ def stworz_raport_pdf():
     pdf.set_font("Arial", "B", 14)
     pdf.cell(200, 10, txt=formatuj_tekst(f"SZACOWANY ZYSK ROCZNY NETTO: {zysk_roczny:,.2f} PLN".replace(',', ' ')), ln=True)
     
-    # Bezpieczne generowanie pliku (radzi sobie ze standardowym formatem w Pythonie)
-    out = pdf.output(dest='S')
-    if isinstance(out, str):
-        return out.encode('latin-1', 'replace')
-    return out
+    # KLUCZOWA POPRAWKA - Konwersja formatu na czyste bajty dla Streamlit
+    pdf_out = pdf.output()
+    if isinstance(pdf_out, str):
+        return pdf_out.encode('latin-1', 'replace')
+    return bytes(pdf_out)
 
 st.info("Kliknij poniżej, aby wygenerować dokument podsumowujący obliczenia w formie PDF.")
 pdf_bytes = stworz_raport_pdf()
