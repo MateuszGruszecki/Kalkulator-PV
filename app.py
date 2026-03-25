@@ -182,69 +182,70 @@ st.plotly_chart(fig, use_container_width=True)
 st.markdown("---")
 st.subheader("📄 Generowanie Raportu PDF")
 
-def pobierz_czcionke():
-    # Zmieniamy nazwę pliku, żeby zignorować stary, zepsuty pobrany plik
-    font_path = "Czcionka_PL.ttf" 
-    
-    if not os.path.exists(font_path):
-        # Używamy prawidłowego linku RAW (bezpośrednio do pliku binarnego)
-        url = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans.ttf"
-        r = requests.get(url, allow_redirects=True)
-        open(font_path, 'wb').write(r.content)
-        
-    return font_path
+def formatuj_tekst(tekst):
+    """Usuwa polskie znaki, zamieniając je na odpowiedniki bez ogonków, co eliminuje błędy PDF."""
+    zamienniki = {
+        'ą':'a', 'ć':'c', 'ę':'e', 'ł':'l', 'ń':'n', 'ó':'o', 'ś':'s', 'ź':'z', 'ż':'z',
+        'Ą':'A', 'Ć':'C', 'Ę':'E', 'Ł':'L', 'Ń':'N', 'Ó':'O', 'Ś':'S', 'Ź':'Z', 'Ż':'Z'
+    }
+    for pl, lat in zamienniki.items():
+        tekst = tekst.replace(pl, lat)
+    return tekst
 
 def stworz_raport_pdf():
-    font_path = pobierz_czcionke()
     pdf = FPDF()
     pdf.add_page()
-    pdf.add_font("DejaVu", "", font_path, uni=True)
-    pdf.set_font("DejaVu", "", 12)
     
-    # Nagłówek
-    pdf.set_font("DejaVu", "", 18)
-    pdf.cell(200, 10, txt="Raport Oplacalnosci Instalacji PV (B2B)", ln=True, align='C')
+    # Używamy wbudowanej czcionki Arial - NIE WYMAGA ŻADNYCH PLIKÓW!
+    pdf.set_font("Arial", "", 12)
+    
+    # Nagłówek (dodajemy "B" dla pogrubienia)
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(200, 10, txt=formatuj_tekst("Raport Oplacalnosci Instalacji PV (B2B)"), ln=True, align='C')
     pdf.ln(10)
     
     # Sekcja 1
-    pdf.set_font("DejaVu", "", 14)
-    pdf.cell(200, 10, txt="1. Parametry Inwestycji", ln=True)
-    pdf.set_font("DejaVu", "", 12)
-    pdf.cell(200, 8, txt=f"Operator OSD: {osd}", ln=True)
-    pdf.cell(200, 8, txt=f"Taryfa: {taryfa}", ln=True)
-    pdf.cell(200, 8, txt=f"Moc instalacji PV: {moc_pv} kWp", ln=True)
-    pdf.cell(200, 8, txt=f"Moc umowna firmy: {moc_umowna} kW", ln=True)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(200, 10, txt=formatuj_tekst("1. Parametry Inwestycji"), ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Operator OSD: {osd}"), ln=True)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Taryfa: {taryfa}"), ln=True)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Moc instalacji PV: {moc_pv} kWp"), ln=True)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Moc umowna firmy: {moc_umowna} kW"), ln=True)
     pdf.ln(5)
     
     # Sekcja 2
-    pdf.set_font("DejaVu", "", 14)
-    pdf.cell(200, 10, txt="2. Bilans Energetyczny (Roczny)", ln=True)
-    pdf.set_font("DejaVu", "", 12)
-    pdf.cell(200, 8, txt=f"Pobor z sieci PRZED instalacja: {df['Zużycie (kWh)'].sum()/1000:,.1f} MWh".replace(',', ' '), ln=True)
-    pdf.cell(200, 8, txt=f"Pobor z sieci PO instalacji PV: {df['Pobor_z_sieci_po_PV'].sum()/1000:,.1f} MWh".replace(',', ' '), ln=True)
-    pdf.cell(200, 8, txt=f"Calkowita generacja z PV: {df['Generacja_PV_kWh'].sum()/1000:,.1f} MWh".replace(',', ' '), ln=True)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(200, 10, txt=formatuj_tekst("2. Bilans Energetyczny (Roczny)"), ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Pobor z sieci PRZED instalacja: {df['Zużycie (kWh)'].sum()/1000:,.1f} MWh".replace(',', ' ')), ln=True)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Pobor z sieci PO instalacji PV: {df['Pobor_z_sieci_po_PV'].sum()/1000:,.1f} MWh".replace(',', ' ')), ln=True)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Calkowita generacja z PV: {df['Generacja_PV_kWh'].sum()/1000:,.1f} MWh".replace(',', ' ')), ln=True)
     pdf.ln(5)
     
     # Sekcja 3
-    pdf.set_font("DejaVu", "", 14)
-    pdf.cell(200, 10, txt="3. Wplyw na Oplate Mocowa (Kwalifikacja)", ln=True)
-    pdf.set_font("DejaVu", "", 12)
-    pdf.cell(200, 8, txt=f"Kwalifikacja PRZED PV: {kat_przed_nazwa} (Koszt: {koszt_mocowy_przed:,.2f} PLN)".replace(',', ' '), ln=True)
-    pdf.cell(200, 8, txt=f"Kwalifikacja PO PV: {kat_po_nazwa} (Koszt: {koszt_mocowy_po:,.2f} PLN)".replace(',', ' '), ln=True)
-    pdf.cell(200, 8, txt=f"Oszczednosc na samej oplacie mocowej: {(koszt_mocowy_przed - koszt_mocowy_po):,.2f} PLN".replace(',', ' '), ln=True)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(200, 10, txt=formatuj_tekst("3. Wplyw na Oplate Mocowa (Kwalifikacja)"), ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Kwalifikacja PRZED PV: {kat_przed_nazwa} (Koszt: {koszt_mocowy_przed:,.2f} PLN)".replace(',', ' ')), ln=True)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Kwalifikacja PO PV: {kat_po_nazwa} (Koszt: {koszt_mocowy_po:,.2f} PLN)".replace(',', ' ')), ln=True)
+    pdf.cell(200, 8, txt=formatuj_tekst(f"Oszczednosc na samej oplacie mocowej: {(koszt_mocowy_przed - koszt_mocowy_po):,.2f} PLN".replace(',', ' ')), ln=True)
     pdf.ln(5)
     
     # Sekcja 4
-    pdf.set_font("DejaVu", "", 14)
-    pdf.cell(200, 10, txt="4. Podsumowanie Finansowe", ln=True)
-    pdf.set_font("DejaVu", "", 12)
-    pdf.multi_cell(0, 8, txt="Poniższa kwota uwzględnia oszczędności na energii czynnej, zmiennych opłatach dystrybucyjnych oraz redukcji opłaty mocowej wynikającej ze zmiany profilu poboru w godzinach szczytowych.")
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(200, 10, txt=formatuj_tekst("4. Podsumowanie Finansowe"), ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.multi_cell(0, 8, txt=formatuj_tekst("Powyzsza kwota uwzglednia oszczednosci na energii czynnej, zmiennych oplatach dystrybucyjnych oraz redukcji oplaty mocowej wynikajacej ze zmiany profilu poboru w godzinach szczytowych."))
     pdf.ln(2)
-    pdf.set_font("DejaVu", "", 14)
-    pdf.cell(200, 10, txt=f"SZACOWANY ZYSK ROCZNY NETTO: {zysk_roczny:,.2f} PLN".replace(',', ' '), ln=True)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(200, 10, txt=formatuj_tekst(f"SZACOWANY ZYSK ROCZNY NETTO: {zysk_roczny:,.2f} PLN".replace(',', ' ')), ln=True)
     
-    # Generowanie pliku do zmiennej w pamięci
-    return pdf.output(dest='S').encode('latin-1')
+    # Bezpieczne generowanie pliku (radzi sobie ze standardowym formatem w Pythonie)
+    out = pdf.output(dest='S')
+    if isinstance(out, str):
+        return out.encode('latin-1', 'replace')
+    return out
 
 st.info("Kliknij poniżej, aby wygenerować dokument podsumowujący obliczenia w formie PDF.")
 pdf_bytes = stworz_raport_pdf()
