@@ -5,8 +5,8 @@ import plotly.graph_objects as go
 import io
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Kalkulator PV B2B - Final Fix", layout="wide")
-st.title("⚡ Analiza PV B2B: Opłata Mocowa 2026 (Dobowa)")
+st.set_page_config(page_title="Kalkulator PV B2B - Raport 2026", layout="wide")
+st.title("⚡ Analiza PV B2B: Bilans i Raport Opłaty Mocowej 2026")
 
 # --- PARAMETRY USTAWOWE 2026 ---
 STAWKA_MOCOWA_BAZOWA = 0.2194 
@@ -65,7 +65,7 @@ df['Godzina'] = df['Timestamp'].dt.hour
 df['Miesiąc_Numer'] = df['Timestamp'].dt.month
 df['Miesiąc_Nazwa'] = df['Timestamp'].dt.strftime('%m - %b')
 
-# --- PV ---
+# --- SYMULACJA PV ---
 weights = {1:0.3, 2:0.5, 3:0.9, 4:1.2, 5:1.5, 6:1.6, 7:1.6, 8:1.4, 9:1.0, 10:0.6, 11:0.3, 12:0.2}
 sin_p = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12))
 df['Gen_Raw'] = sin_p * df['Miesiąc_Numer'].map(weights)
@@ -80,23 +80,22 @@ df['Is_Szczyt'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy']
 
 def get_moc_daily(sub_df, col):
     if not sub_df['Roboczy'].any():
-        return pd.Series({'Koszt': 0.0, 'Mnożnik': 0.17}) # Brak szczytu = najniższa kategoria
+        return pd.Series({'Koszt': 0.0, 'Mnożnik': 0.17, 'L_Factor': 0.0})
     
     e_szczyt = sub_df[sub_df['Is_Szczyt']][col].sum()
     e_doba = sub_df[col].sum()
     
-    if e_doba < 0.1: return pd.Series({'Koszt': 0.0, 'Mnożnik': 0.17})
+    if e_doba < 0.1: return pd.Series({'Koszt': 0.0, 'Mnożnik': 0.17, 'L_Factor': 0.0})
     
-    # Współczynnik L (Delta) = |(Energia Szczyt / Energia Doba) - 0.625|
-    # Używamy wartości bezwzględnej abs() zgodnie z definicją "różnicy" udziałów
-    delta = abs((e_szczyt / e_doba) - 0.625)
+    l_factor = (e_szczyt / e_doba) - 0.625
+    delta = abs(l_factor)
     
     if delta < 0.05: mn = 0.17
     elif delta < 0.10: mn = 0.50
     elif delta < 0.15: mn = 0.83
     else: mn = 1.00
     
-    return pd.Series({'Koszt': e_szczyt * STAWKA_MOCOWA_BAZOWA * mn, 'Mnożnik': mn})
+    return pd.Series({'Koszt': e_szczyt * STAWKA_MOCOWA_BAZOWA * mn, 'Mnożnik': mn, 'L_Factor': l_factor})
 
 moc_po = df.groupby('Data_Klucz').apply(lambda x: get_moc_daily(x, 'Nowy_Pobór'))
 moc_pre = df.groupby('Data_Klucz').apply(lambda x: get_moc_daily(x, 'Pobór'))
@@ -126,23 +125,39 @@ e_n, d_n = calc_all('Nowy_Pobór')
 
 # --- PREZENTACJA ---
 st.subheader("💰 Bilans Oszczędności Rocznych (Netto 2026)")
+total_gain = (e_p + d_p + total_m_pre) - (e_n + d_n + total_m_po)
 st.table(pd.DataFrame({
     "Składnik": ["Energia czynna", "Dystrybucja zmienna", "Opłata mocowa (DOBOWA)", "RAZEM"],
     "PRZED PV [PLN]": [e_p, d_p, total_m_pre, e_p+d_p+total_m_pre],
     "PO PV [PLN]": [e_n, d_n, total_m_po, e_n+d_n+total_m_po],
-    "ZYSK [PLN]": [e_p-e_n, d_p-d_n, total_m_pre-total_m_po, (e_p+d_p+total_m_pre)-(e_n+d_n+total_m_po)]
+    "ZYSK [PLN]": [e_p-e_n, d_p-d_n, total_m_pre-total_m_po, total_gain]
 }).set_index("Składnik").style.format("{:,.2f}"))
 
 st.markdown("---")
+st.subheader("📊 Raport Szczegółowy Energii i Ulgi Mocowej")
+
+# Obliczanie sum energii szczytowej i współczynnika L
+e_sz_pre = df[df['Is_Szczyt']]['Pobór'].sum() / 1000 # MWh
+e_psz_pre = df[~df['Is_Szczyt']]['Pobór'].sum() / 1000 # MWh
+e_sz_po = df[df['Is_Szczyt']]['Nowy_Pobór'].sum() / 1000 # MWh
+e_psz_po = df[~df['Is_Szczyt']]['Nowy_Pobór'].sum() / 1000 # MWh
+
+avg_l_pre = moc_pre['L_Factor'].mean() * 100
+avg_l_po = moc_po['L_Factor'].mean() * 100
+
+st.table(pd.DataFrame({
+    "Parametr": ["Energia w szczycie [MWh]", "Energia poza szczytem [MWh]", "Średni współczynnik L [%]"],
+    "PRZED PV": [e_sz_pre, e_psz_pre, avg_l_pre],
+    "PO PV": [e_sz_po, e_psz_po, avg_l_po]
+}).set_index("Parametr").style.format("{:,.2f}"))
+
+st.info(f"💡 Współczynnik L (Delta) określa różnicę między udziałem energii w szczycie a płaskim profilem (62,5%). Im bliżej 0%, tym wyższa ulga.")
+
+st.markdown("---")
 st.subheader("🧐 Rozkład kategorii mocowych (Dni w miesiącu)")
-st.write("Współczynnik L = |(Energia Szczyt / Energia Doba) - 62,5%|. Premiuje profile płaskie.")
-
-
-
 stats_df = moc_po.copy().reset_index()
 stats_df['Miesiąc'] = pd.to_datetime(stats_df['Data_Klucz']).dt.month
 dist = stats_df.groupby(['Miesiąc', 'Mnożnik']).size().unstack(fill_value=0)
-
 for m in [0.17, 0.50, 0.83, 1.00]:
     if m not in dist.columns: dist[m] = 0
 dist = dist[[0.17, 0.50, 0.83, 1.00]]
@@ -150,11 +165,10 @@ dist.columns = ["K1 (0.17)", "K2 (0.50)", "K3 (0.83)", "K4 (1.00)"]
 st.table((dist.div(dist.sum(axis=1), axis=0) * 100).style.format("{:.1f}%"))
 
 # Wykres
-st.markdown("---")
 m_plot = df.groupby(['Miesiąc_Numer', 'Miesiąc_Nazwa'])[['Pobór', 'Autokonsumpcja', 'Nowy_Pobór']].sum().reset_index()
 fig = go.Figure()
 fig.add_trace(go.Bar(x=m_plot['Miesiąc_Nazwa'], y=m_plot['Pobór'], name="Pobór Pierwotny", marker_color='#E74C3C'))
 fig.add_trace(go.Bar(x=m_plot['Miesiąc_Nazwa'], y=m_plot['Autokonsumpcja'], name="Autokonsumpcja", marker_color='#2ECC71'))
 fig.add_trace(go.Bar(x=m_plot['Miesiąc_Nazwa'], y=m_plot['Nowy_Pobór'], name="Zakup po PV", marker_color='#3498DB'))
-fig.update_layout(barmode='group', template="plotly_white", title="Energia w skali miesiąca [kWh]", legend=dict(orientation="h", y=1.1))
+fig.update_layout(barmode='group', template="plotly_white", title="Miesięczny bilans energii [kWh]", legend=dict(orientation="h", y=1.1))
 st.plotly_chart(fig, use_container_width=True)
