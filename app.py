@@ -5,12 +5,12 @@ import plotly.graph_objects as go
 import io
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Kalkulator PV B2B - ROI & Bilans", layout="wide")
+st.set_page_config(page_title="Kalkulator PV B2B - Autokonsumpcja", layout="wide")
 st.title("⚡ Profesjonalna Analiza PV dla Biznesu (Netto 2026)")
 
-# --- STAŁE ---
+# --- BAZA DANYCH OSD (Netto 2026) ---
 WSPOLNE_NETTO = 0.04346 
-OPLATA_MOCOWA_NETTO = 0.2194
+OPLATA_MOCOWA_NETTO = 0.2194 # 219,40 zł/MWh netto
 
 osd_data = {
     "PGE": {"B21": {"całodobowa": 0.06446}, "B22": {"szczyt": 0.08512, "pozaszczyt": 0.04467}, "B23": {"przedpołudnie": 0.06611, "popołudnie": 0.12438, "pozostałe": 0.02298}},
@@ -20,22 +20,17 @@ osd_data = {
 }
 
 # --- PANEL BOCZNY ---
-st.sidebar.header("⚙️ Konfiguracja")
-data_type = st.sidebar.radio("Tryb pliku:", ["15-minutowy", "Godzinowy"])
+st.sidebar.header("⚙️ Ustawienia")
+data_type = st.sidebar.radio("Tryb danych w pliku:", ["15-minutowe", "Godzinowe"])
 osd_choice = st.sidebar.selectbox("Operator OSD", list(osd_data.keys()))
 taryfa_choice = st.sidebar.selectbox("Taryfa", ["B21", "B22", "B23"])
-cena_mwh = st.sidebar.number_input("Cena energii (PLN/MWh netto)", value=485.0)
-
-st.sidebar.markdown("---")
-st.sidebar.header("☀️ System Fotowoltaiczny")
+cena_mwh = st.sidebar.number_input("Cena energii czynnej (PLN/MWh netto)", value=485.0)
 moc_pv = st.sidebar.number_input("Moc PV (kWp)", value=50.0)
 uzysk = st.sidebar.number_input("Uzysk roczny (kWh/kWp)", value=1000.0)
-koszt_kwp = st.sidebar.number_input("Koszt instalacji (PLN netto / kWp)", value=3200.0)
-cena_sprzedazy = st.sidebar.number_input("Cena sprzedaży nadwyżek (PLN/MWh)", value=350.0)
 
 uploaded_file = st.sidebar.file_uploader("Wgraj dane klienta (CSV)", type=['csv'])
 
-# --- WCZYTYWANIE I NAPRAWA KOLUMN ---
+# --- WCZYTYWANIE DANYCH ---
 df = None
 if uploaded_file:
     try:
@@ -44,7 +39,7 @@ if uploaded_file:
         except: decoded = raw.decode('utf-8', errors='ignore')
         df_raw = pd.read_csv(io.StringIO(decoded), sep=';', decimal=',', engine='python', header=None, skiprows=1)
         
-        if data_type == "15-minutowy":
+        if data_type == "15-minutowe":
             temp = pd.DataFrame({
                 'T': pd.to_datetime(df_raw.iloc[:, 0] + ' ' + df_raw.iloc[:, 1], dayfirst=True, errors='coerce'),
                 'V': pd.to_numeric(df_raw.iloc[:, 2], errors='coerce').fillna(0)
@@ -61,26 +56,25 @@ if df is None:
     dates = pd.date_range("2026-01-01", periods=8760, freq="h")
     df = pd.DataFrame({"Timestamp": dates, "Pobór": np.random.uniform(50, 150, 8760)})
 
-# --- OBLICZENIA BILANSU (Zawsze tworzymy te kolumny!) ---
+# --- OBLICZENIA BILANSU ---
 df['Godzina'] = df['Timestamp'].dt.hour
 df['Roboczy'] = df['Timestamp'].dt.weekday < 5
 
-# Symulacja produkcji
+# Generacja PV
 sin_p = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12))
 sin_sum = sin_p.sum()
 df['Generacja_PV'] = (sin_p / sin_sum * (moc_pv * uzysk * (len(df)/8760))) if sin_sum > 0 else 0
 
-# Rozliczenie Autokonsumpcji
+# Rozliczenie Autokonsumpcji i Nadwyżek
 df['Autokonsumpcja'] = np.minimum(df['Pobór'], df['Generacja_PV'])
-df['Eksport'] = np.maximum(0, df['Generacja_PV'] - df['Pobór'])
+df['Nadwyżka_PV'] = np.maximum(0, df['Generacja_PV'] - df['Pobór'])
 df['Nowy_Pobór'] = df['Pobór'] - df['Autokonsumpcja']
 
-# Statystyki
-total_pobor = df['Pobór'].sum()
+# Statystyki energii
 total_pv = df['Generacja_PV'].sum()
 total_auto = df['Autokonsumpcja'].sum()
-total_eks = df['Eksport'].sum()
-auto_proc = (total_auto / total_pv * 100) if total_pv > 0 else 0
+total_nadwyzka = df['Nadwyżka_PV'].sum()
+auto_ratio = (total_auto / total_pv * 100) if total_pv > 0 else 0
 
 # --- FINANSE ---
 def get_strefa(row):
@@ -109,40 +103,52 @@ def calc_cost(col):
 e_p, d_p, m_p, mn_p, sz_p = calc_cost('Pobór')
 e_n, d_n, m_n, mn_n, sz_n = calc_cost('Nowy_Pobór')
 
-zysk_rachunek = (e_p + d_p + m_p) - (e_n + d_n + m_n)
-przychody_eksport = total_eks * (cena_sprzedazy / 1000)
-laczny_zysk = zysk_rachunek + przychody_eksport
-koszt_caly = moc_pv * koszt_kwp
-roi = koszt_caly / laczny_zysk if laczny_zysk > 0 else 0
+# --- WYŚWIETLANIE WYNIKÓW ---
+st.header(f"📊 Bilans Energii i Oszczędności: {osd_choice} {taryfa_choice}")
 
-# --- WYNIKI ---
-st.header("📊 Raport Energetyczno-Finansowy")
+# Wskaźniki autokonsumpcji
+c1, c2, c3 = st.columns(3)
+c1.metric("Produkcja PV", f"{total_pv/1000:,.1f} MWh")
+c2.metric("Autokonsumpcja", f"{total_auto/1000:,.1f} MWh", f"{auto_ratio:.1f}%")
+c3.metric("Nadwyżki (Eksport)", f"{total_nadwyzka/1000:,.1f} MWh")
 
-# Wskaźniki
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Autokonsumpcja", f"{auto_proc:.1f}%")
-k2.metric("Oszczędność rachunku", f"{zysk_rachunek:,.2f} zł")
-k3.metric("Przychód z eksportu", f"{przychody_eksport:,.2f} zł")
-k4.metric("Czas zwrotu (ROI)", f"{roi:.1f} lat")
-
-if auto_proc < 15:
-    st.error(f"⚠️ Uwaga: System jest bardzo przewymiarowany. Klient zużywa tylko {auto_proc:.1f}% energii na miejscu. Rozważ mniejszą moc lub magazyn energii.")
-
-# Tabela
-st.subheader("💰 Szczegóły Oszczędności (Netto)")
+# Główna tabela kosztów
+st.subheader("💰 Oszczędności na rachunku (Netto)")
 st.table(pd.DataFrame({
-    "Składnik": ["Energia czynna", "Dystrybucja", "Opłata mocowa", "Zysk z Eksportu", "SUMA KORZYŚCI"],
-    "PRZED PV [PLN]": [e_p, d_p, m_p, 0, e_p+d_p+m_p],
-    "PO PV [PLN]": [e_n, d_n, m_n, przychody_eksport * -1, (e_n+d_n+m_n) - przychody_eksport],
-    "KORZYŚĆ [PLN]": [e_p-e_n, d_p-d_n, m_p-m_n, przychody_eksport, laczny_zysk]
+    "Składnik": ["Energia czynna", "Dystrybucja zmienna", "Opłata mocowa", "RAZEM"],
+    "PRZED PV [PLN]": [e_p, d_p, m_p, e_p+d_p+m_p],
+    "PO PV [PLN]": [e_n, d_n, m_n, e_n+d_n+m_n],
+    "OSZCZĘDNOŚĆ [PLN]": [e_p-e_n, d_p-d_n, m_p-m_n, (e_p+d_p+m_p)-(e_n+d_n+m_n)]
 }).set_index("Składnik").style.format("{:,.2f}"))
 
-# Wykres
+# Przywrócona tabela kategorii mocowych (K1-K4)
 st.markdown("---")
-avg = df.groupby('Godzina')[['Pobór', 'Autokonsumpcja', 'Generacja_PV', 'Eksport']].mean().reindex(range(24)).fillna(0)
+st.subheader("⚡ Dokładne zestawienie opłaty mocowej wg kategorii (K1-K4)")
+col_m1, col_m2 = st.columns(2)
+
+def gen_moc_table(sz, mn_act):
+    mns = [0.17, 0.50, 0.83, 1.00]
+    df_m = pd.DataFrame({
+        "Kategoria": ["K1 (17%)", "K2 (50%)", "K3 (83%)", "K4 (100%)"],
+        "Stawka [zł/kWh]": [OPLATA_MOCOWA_NETTO * m for m in mns],
+        "Roczny Koszt [PLN]": [sz * OPLATA_MOCOWA_NETTO * m for m in mns]
+    })
+    return df_m.style.apply(lambda x: ['background-color: #d1f2d1' if mn_act == mns[x.name] else '' for _ in x], axis=1).format({"Stawka [zł/kWh]": "{:.4f}", "Roczny Koszt [PLN]": "{:,.2f}"})
+
+with col_m1:
+    st.write(f"**PRZED PV** (Pobór w godz. mocowych: {sz_p/1000:,.2f} MWh)")
+    st.table(gen_moc_table(sz_p, mn_p))
+
+with col_m2:
+    st.write(f"**PO PV** (Pobór w godz. mocowych: {sz_n/1000:,.2f} MWh)")
+    st.table(gen_moc_table(sz_n, mn_n))
+
+# Wykres profilu dobowego
+st.markdown("---")
+avg = df.groupby('Godzina')[['Pobór', 'Autokonsumpcja', 'Generacja_PV', 'Nadwyżka_PV']].mean().reindex(range(24)).fillna(0)
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=list(range(24)), y=avg['Pobór'], name="Oryginalny Pobór", line=dict(color='red', width=2)))
-fig.add_trace(go.Bar(x=list(range(24)), y=avg['Autokonsumpcja'], name="Autokonsumpcja", marker_color='green'))
-fig.add_trace(go.Bar(x=list(range(24)), y=avg['Eksport'], name="Eksport (Nadprodukcja)", marker_color='rgba(255, 165, 0, 0.4)'))
-fig.update_layout(title="Średni profil dobowy (kWh) - Bilans", barmode='stack', template="plotly_white", xaxis=dict(dtick=1))
+fig.add_trace(go.Scatter(x=list(range(24)), y=avg['Pobór'], name="Pobór przed PV", line=dict(color='red', width=2)))
+fig.add_trace(go.Bar(x=list(range(24)), y=avg['Autokonsumpcja'], name="Autokonsumpcja (zysk)", marker_color='green'))
+fig.add_trace(go.Bar(x=list(range(24)), y=avg['Nadwyżka_PV'], name="Nadwyżka (eksport)", marker_color='rgba(255, 165, 0, 0.4)'))
+fig.update_layout(title="Średni profil dobowy (kWh) - Bilans energii", barmode='stack', template="plotly_white", xaxis=dict(dtick=1))
 st.plotly_chart(fig, use_container_width=True)
