@@ -4,8 +4,8 @@ import numpy as np
 import plotly.graph_objects as go
 
 # --- USTAWIENIA STRONY ---
-st.set_page_config(page_title="Analiza Kosztów PV", layout="wide")
-st.title("📉 Porównanie Kosztów Energii: Przed i Po PV")
+st.set_page_config(page_title="Analiza Kosztów i Profili PV", layout="wide")
+st.title("📉 Kompleksowa Analiza Opłacalności PV dla Biznesu")
 
 # --- BAZA CENNIKÓW (2026) ---
 osd_tariffs_b = {
@@ -49,10 +49,11 @@ uzysk = st.sidebar.number_input("Uzysk (kWh/kWp)", value=1000.0)
 
 uploaded_file = st.sidebar.file_uploader("Wgraj profil CSV", type=['csv'])
 
-# --- LOGIKA ---
+# --- LOGIKA OBLICZEŃ ---
 if uploaded_file is None:
+    st.info("💡 Używam profilu demonstracyjnego. Wgraj CSV dla realnych danych.")
     dates = pd.date_range(start="2026-01-01", periods=8760, freq="h")
-    pobor = np.where((dates.hour >= 8) & (dates.hour < 16), np.random.uniform(40, 60, 8760), np.random.uniform(10, 20, 8760))
+    pobor = np.where((dates.hour >= 8) & (dates.hour < 17), np.random.uniform(40, 70, 8760), np.random.uniform(10, 25, 8760))
     df = pd.DataFrame({"Data": dates, "Pobór": pobor})
 else:
     df = pd.read_csv(uploaded_file)
@@ -61,7 +62,6 @@ else:
 
 # Symulacja PV i Bilans
 df['Godzina'] = np.arange(len(df)) % 24
-df['Dzień_Roku'] = np.arange(len(df)) // 24
 df['Roboczy'] = pd.to_datetime(np.arange(len(df)), unit='h', origin='2026-01-01').weekday < 5
 
 profil_dzienny = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12)) 
@@ -85,36 +85,65 @@ def kalkulacja(col):
     en = df[col].sum() * cena_kwh_netto
     dys = sum(df[df['Strefa'] == s][col].sum() * stawki_dyst[s] for s in stawki_dyst)
     sz_m, pz_m = df[df['Godzina_Mocowa']][col].sum(), df[~df['Godzina_Mocowa']][col].sum()
-    delta = (sz_m - pz_m) / (sz_m + pz_m) if (sz_m + pz_m) > 0 else 0
+    calkowite = sz_m + pz_m
+    delta = (sz_m - pz_m) / calkowite if calkowite > 0 else 0
     mnoznik = 0.17 if delta < 0.05 else (0.5 if delta < 0.10 else (0.83 if delta < 0.15 else 1.0))
     moc = sz_m * OPLATA_MOCOWA_2026 * mnoznik
-    return round(en, 2), round(dys, 2), round(moc, 2)
+    return en, dys, moc, delta, mnoznik
 
-e_przed, d_przed, m_przed = kalkulacja('Pobór')
-e_po, d_po, m_po = kalkulacja('Nowy_Pobór')
+e_przed, d_przed, m_przed, delta_przed, mn_przed = kalkulacja('Pobór')
+e_po, d_po, m_po, delta_po, mn_po = kalkulacja('Nowy_Pobór')
 
-# --- PREZENTACJA DANYCH ---
+# --- PREZENTACJA: SEKCOJA FINANSOWA ---
+st.header("💰 Analiza Finansowa (Netto)")
 
-# 1. Tabela Porównawcza
-st.subheader("📋 Porównanie Rocznych Kosztów (Netto)")
-data_compare = {
-    "Kategoria kosztów": ["Energia Czynna", "Dystrybucja (Zmienna)", "Opłata Mocowa", "SUMA"],
-    "PRZED PV [PLN]": [f"{e_przed:,.2f}", f"{d_przed:,.2f}", f"{m_przed:,.2f}", f"{e_przed+d_przed+m_przed:,.2f}"],
-    "PO PV [PLN]": [f"{e_po:,.2f}", f"{d_po:,.2f}", f"{m_po:,.2f}", f"{e_po+d_po+m_po:,.2f}"],
-    "OSZCZĘDNOŚĆ [PLN]": [f"{e_przed-e_po:,.2f}", f"{d_przed-d_po:,.2f}", f"{m_przed-m_po:,.2f}", f"{(e_przed+d_przed+m_przed)-(e_po+d_po+m_po):,.2f}"]
-}
-st.table(pd.DataFrame(data_compare))
+col_a, col_b = st.columns([2, 1])
 
-# 2. Wykres Słupkowy Porównawczy
-st.subheader("📊 Struktura Kosztów: Przed vs Po")
-categories = ["Energia Czynna", "Dystrybucja", "Opłata Mocowa"]
-fig_costs = go.Figure(data=[
-    go.Bar(name='Przed PV', x=categories, y=[e_przed, d_przed, m_przed], marker_color='#E74C3C'),
-    go.Bar(name='Po PV', x=categories, y=[e_po, d_po, m_po], marker_color='#2ECC71')
-])
-fig_costs.update_layout(barmode='group', yaxis_title="Koszt w PLN", template="plotly_white")
-st.plotly_chart(fig_costs, use_container_width=True)
+with col_a:
+    st.subheader("📋 Zestawienie Roczne")
+    data_compare = {
+        "Kategoria": ["Energia Czynna", "Dystrybucja (Zmienna)", "Opłata Mocowa", "RAZEM"],
+        "PRZED PV [PLN]": [f"{e_przed:,.2f}", f"{d_przed:,.2f}", f"{m_przed:,.2f}", f"{e_przed+d_przed+m_przed:,.2f}"],
+        "PO PV [PLN]": [f"{e_po:,.2f}", f"{d_po:,.2f}", f"{m_po:,.2f}", f"{e_po+d_po+m_po:,.2f}"],
+        "ZYSK [PLN]": [f"{e_przed-e_po:,.2f}", f"{d_przed-d_po:,.2f}", f"{m_przed-m_po:,.2f}", f"{(e_przed+d_przed+m_przed)-(e_po+d_po+m_po):,.2f}"]
+    }
+    st.table(pd.DataFrame(data_compare))
 
-# 3. Podsumowanie procentowe
-zysk_proc = ((e_przed+d_przed+m_przed)-(e_po+d_po+m_po)) / (e_przed+d_przed+m_przed) * 100
-st.info(f"💡 Instalacja PV obniża całkowite koszty energii Twojego klienta o ok. **{zysk_proc:.1f}%** rocznie.")
+with col_b:
+    st.subheader("📊 Struktura Kosztów")
+    categories = ["Energia", "Dystrybucja", "Mocowa"]
+    fig_costs = go.Figure(data=[
+        go.Bar(name='Przed', x=categories, y=[e_przed, d_przed, m_przed], marker_color='#E74C3C'),
+        go.Bar(name='Po', x=categories, y=[e_po, d_po, m_po], marker_color='#2ECC71')
+    ])
+    fig_costs.update_layout(barmode='group', height=300, margin=dict(l=20, r=20, t=20, b=20))
+    st.plotly_chart(fig_costs, use_container_width=True)
+
+# --- PREZENTACJA: PROFIL ENERGETYCZNY ---
+st.markdown("---")
+st.header("☀️ Charakterystyka Energetyczna")
+
+# Wykres profilu (średni dzień)
+sredni_dzien = df.groupby('Godzina')[['Pobór', 'Nowy_Pobór', 'Generacja_PV']].mean()
+
+fig_prof = go.Figure()
+fig_prof.add_trace(go.Scatter(x=sredni_dzien.index, y=sredni_dzien['Pobór'], name="Pobór Pierwotny", line=dict(color='#E74C3C', width=2)))
+fig_prof.add_trace(go.Scatter(x=sredni_dzien.index, y=sredni_dzien['Nowy_Pobór'], name="Pobór po PV", fill='tozeroy', line=dict(color='#2ECC71', width=2)))
+fig_prof.add_trace(go.Bar(x=sredni_dzien.index, y=sredni_dzien['Generacja_PV'], name="Generacja PV", opacity=0.4, marker_color='orange'))
+
+fig_prof.update_layout(
+    title="Średniodobowy profil przepływu energii",
+    xaxis_title="Godzina",
+    yaxis_title="Moc / Energia [kWh]",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    template="plotly_white"
+)
+st.plotly_chart(fig_prof, use_container_width=True)
+
+# Dodatkowe info o mocowej
+st.info(f"""
+**Analiza Opłaty Mocowej (2026):**
+* Współczynnik Δ przed PV: **{delta_przed:.3f}** (Mnożnik: {mn_przed})
+* Współczynnik Δ po PV: **{delta_po:.3f}** (Mnożnik: {mn_po})
+* PV obniżyło pobór w godzinach szczytowych o **{df['Pobór'].sum() - df['Nowy_Pobór'].sum():,.1f} kWh**.
+""")
