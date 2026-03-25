@@ -2,13 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from fpdf import FPDF
 
 # --- USTAWIENIA STRONY ---
-st.set_page_config(page_title="Kalkulator PV B2B - Stała Cena", layout="wide")
-st.title("⚡ Profesjonalny Kalkulator PV dla Biznesu (B21, B22, B23)")
+st.set_page_config(page_title="Analiza Kosztów PV", layout="wide")
+st.title("📉 Porównanie Kosztów Energii: Przed i Po PV")
 
-# --- BAZA CENNIKÓW OSD (DOMYŚLNE NA 2026 R.) ---
+# --- BAZA CENNIKÓW (2026) ---
 osd_tariffs_b = {
     "PGE": {
         "B21": {"całodobowa": 0.2450},
@@ -31,36 +30,28 @@ osd_tariffs_b = {
         "B23": {"przedpołudnie": 0.2200, "popołudnie": 0.3400, "pozostałe": 0.0900}
     }
 }
-OPLATA_MOCOWA_2026 = 0.2194  # 219,40 zł/MWh netto
+OPLATA_MOCOWA_2026 = 0.2194 
 
 # --- PANEL BOCZNY ---
-st.sidebar.header("🛡️ Parametry Kontraktu")
-cena_mwh_netto = st.sidebar.number_input("Stała cena energii czynnej (PLN/MWh netto)", value=485.0, step=10.0)
+st.sidebar.header("⚙️ Konfiguracja")
+cena_mwh_netto = st.sidebar.number_input("Cena energii czynnej (PLN/MWh netto)", value=485.0)
 cena_kwh_netto = cena_mwh_netto / 1000
 
-st.sidebar.markdown("---")
-st.sidebar.header("🚛 Dystrybucja i OSD")
-osd_choice = st.sidebar.selectbox("Wybierz Operatora", list(osd_tariffs_b.keys()))
+osd_choice = st.sidebar.selectbox("Operator OSD", list(osd_tariffs_b.keys()))
 taryfa_choice = st.sidebar.selectbox("Taryfa", ["B21", "B22", "B23"])
 
-# Pobieranie stawek dystrybucyjnych z bazy z możliwością edycji
-stawki_dyst_input = {}
-domyslne_stawki = osd_tariffs_b[osd_choice][taryfa_choice]
-for strefa, stawka in domyslne_stawki.items():
-    stawki_dyst_input[strefa] = st.sidebar.number_input(f"Dystrybucja: {strefa} (PLN/kWh)", value=stawka, format="%.4f")
+stawki_dyst = {}
+for strefa, stawka in osd_tariffs_b[osd_choice][taryfa_choice].items():
+    stawki_dyst[strefa] = st.sidebar.number_input(f"Dystrybucja {strefa} (zł/kWh)", value=stawka, format="%.4f")
 
-st.sidebar.markdown("---")
-st.sidebar.header("☀️ Instalacja PV")
-moc_pv = st.sidebar.number_input("Moc instalacji (kWp)", value=50.0)
-uzysk_kwh_kwp = st.sidebar.number_input("Uzysk (kWh/kWp/rok)", value=1000.0)
+moc_pv = st.sidebar.number_input("Moc PV (kWp)", value=50.0)
+uzysk = st.sidebar.number_input("Uzysk (kWh/kWp)", value=1000.0)
 
-uploaded_file = st.sidebar.file_uploader("Wgraj profil godzinowy (CSV)", type=['csv'])
+uploaded_file = st.sidebar.file_uploader("Wgraj profil CSV", type=['csv'])
 
-# --- LOGIKA OBLICZEŃ ---
+# --- LOGIKA ---
 if uploaded_file is None:
-    st.warning("Używam profilu demonstracyjnego. Wgraj plik CSV, aby zobaczyć realne wyniki.")
     dates = pd.date_range(start="2026-01-01", periods=8760, freq="h")
-    # Symulacja profilu firmy (większy pobór w dzień)
     pobor = np.where((dates.hour >= 8) & (dates.hour < 16), np.random.uniform(40, 60, 8760), np.random.uniform(10, 20, 8760))
     df = pd.DataFrame({"Data": dates, "Pobór": pobor})
 else:
@@ -68,101 +59,62 @@ else:
     df.columns = ["Data", "Pobór"]
     df["Pobór"] = pd.to_numeric(df["Pobór"], errors='coerce').fillna(0)
 
-# 1. Symulacja Generacji PV
-# Tworzymy teoretyczny profil (dzwon Gaussa w ciągu dnia)
+# Symulacja PV i Bilans
 df['Godzina'] = np.arange(len(df)) % 24
 df['Dzień_Roku'] = np.arange(len(df)) // 24
-profil_dzienny = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12)) 
-# Skalowanie do całkowitej rocznej produkcji
-calkowita_produkcja = moc_pv * uzysk_kwh_kwp
-df['Generacja_PV'] = (profil_dzienny / profil_dzienny.sum()) * calkowita_produkcja
+df['Roboczy'] = pd.to_datetime(np.arange(len(df)), unit='h', origin='2026-01-01').weekday < 5
 
-# 2. Nowy Bilans
+profil_dzienny = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12)) 
+df['Generacja_PV'] = (profil_dzienny / profil_dzienny.sum()) * (moc_pv * uzysk)
 df['Nowy_Pobór'] = np.maximum(0, df['Pobór'] - df['Generacja_PV'])
 
-# 3. Przypisanie Stref Dystrybucyjnych (Logika czasowa)
-df['Dzień_Tygodnia'] = pd.to_datetime(np.arange(len(df)), unit='h', origin='2026-01-01').weekday
-df['Roboczy'] = df['Dzień_Tygodnia'] < 5
-
-def przypisz_strefe(row):
-    h = row['Godzina']
-    rob = row['Roboczy']
+# Strefy i Mocowa
+def get_strefa(row):
+    h, rob = row['Godzina'], row['Roboczy']
     if taryfa_choice == "B21": return "całodobowa"
-    if taryfa_choice == "B22":
-        return "szczyt" if (6 <= h < 21) and rob else "pozaszczyt"
+    if taryfa_choice == "B22": return "szczyt" if (6 <= h < 21) and rob else "pozaszczyt"
     if taryfa_choice == "B23":
         if not rob: return "pozostałe"
-        if 7 <= h < 13: return "przedpołudnie"
-        if 16 <= h < 21: return "popołudnie"
-        return "pozostałe"
+        return "przedpołudnie" if 7 <= h < 13 else ("popołudnie" if 16 <= h < 21 else "pozostałe")
     return "całodobowa"
 
-df['Strefa'] = df.apply(przypisz_strefe, axis=1)
-
-# 4. Opłata Mocowa (Godziny 7-22 w dni robocze)
+df['Strefa'] = df.apply(get_strefa, axis=1)
 df['Godzina_Mocowa'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy']
 
-# Obliczanie kosztów
-def oblicz_koszty(kolumna_poboru):
-    energia = df[kolumna_poboru].sum() * cena_kwh_netto
-    dystrybucja = sum(df[df['Strefa'] == s][kolumna_poboru].sum() * stawki_dyst_input[s] for s in stawki_dyst_input)
-    
-    # Mocowa (Kwalifikacja)
-    szczyt_m = df[df['Godzina_Mocowa']][kolumna_poboru].sum()
-    poza_m = df[~df['Godzina_Mocowa']][kolumna_poboru].sum()
-    calkowite = szczyt_m + poza_m
-    delta = (szczyt_m - poza_m) / calkowite if calkowite > 0 else 0
-    
-    if delta < 0.05: mnoznik = 0.17
-    elif delta < 0.10: mnoznik = 0.50
-    elif delta < 0.15: mnoznik = 0.83
-    else: mnoznik = 1.00
-    
-    mocowa = szczyt_m * OPLATA_MOCOWA_2026 * mnoznik
-    return energia, dystrybucja, mocowa
+def kalkulacja(col):
+    en = df[col].sum() * cena_kwh_netto
+    dys = sum(df[df['Strefa'] == s][col].sum() * stawki_dyst[s] for s in stawki_dyst)
+    sz_m, pz_m = df[df['Godzina_Mocowa']][col].sum(), df[~df['Godzina_Mocowa']][col].sum()
+    delta = (sz_m - pz_m) / (sz_m + pz_m) if (sz_m + pz_m) > 0 else 0
+    mnoznik = 0.17 if delta < 0.05 else (0.5 if delta < 0.10 else (0.83 if delta < 0.15 else 1.0))
+    moc = sz_m * OPLATA_MOCOWA_2026 * mnoznik
+    return round(en, 2), round(dys, 2), round(moc, 2)
 
-e_przed, d_przed, m_przed = oblicz_koszty('Pobór')
-e_po, d_po, m_po = oblicz_koszty('Nowy_Pobór')
+e_przed, d_przed, m_przed = kalkulacja('Pobór')
+e_po, d_po, m_po = kalkulacja('Nowy_Pobór')
 
-oszcz_en = e_przed - e_po
-oszcz_dyst = d_przed - d_po
-oszcz_moc = m_przed - m_po
-suma_zysk = oszcz_en + oszcz_dyst + oszcz_moc
+# --- PREZENTACJA DANYCH ---
 
-# --- WIZUALIZACJA ---
-c1, c2, c3 = st.columns(3)
-c1.metric("Zysk na Energii Czynnej", f"{oszcz_en:,.0f} PLN".replace(',', ' '))
-c2.metric("Zysk na Dystrybucji", f"{oszcz_dyst:,.0f} PLN".replace(',', ' '))
-c3.metric("Zysk na Opłacie Mocowej", f"{oszcz_moc:,.0f} PLN".replace(',', ' '))
+# 1. Tabela Porównawcza
+st.subheader("📋 Porównanie Rocznych Kosztów (Netto)")
+data_compare = {
+    "Kategoria kosztów": ["Energia Czynna", "Dystrybucja (Zmienna)", "Opłata Mocowa", "SUMA"],
+    "PRZED PV [PLN]": [f"{e_przed:,.2f}", f"{d_przed:,.2f}", f"{m_przed:,.2f}", f"{e_przed+d_przed+m_przed:,.2f}"],
+    "PO PV [PLN]": [f"{e_po:,.2f}", f"{d_po:,.2f}", f"{m_po:,.2f}", f"{e_po+d_po+m_po:,.2f}"],
+    "OSZCZĘDNOŚĆ [PLN]": [f"{e_przed-e_po:,.2f}", f"{d_przed-d_po:,.2f}", f"{m_przed-m_po:,.2f}", f"{(e_przed+d_przed+m_przed)-(e_po+d_po+m_po):,.2f}"]
+}
+st.table(pd.DataFrame(data_compare))
 
-st.subheader(f"💰 Całkowita roczna oszczędność: {suma_zysk:,.2f} PLN Netto")
+# 2. Wykres Słupkowy Porównawczy
+st.subheader("📊 Struktura Kosztów: Przed vs Po")
+categories = ["Energia Czynna", "Dystrybucja", "Opłata Mocowa"]
+fig_costs = go.Figure(data=[
+    go.Bar(name='Przed PV', x=categories, y=[e_przed, d_przed, m_przed], marker_color='#E74C3C'),
+    go.Bar(name='Po PV', x=categories, y=[e_po, d_po, m_po], marker_color='#2ECC71')
+])
+fig_costs.update_layout(barmode='group', yaxis_title="Koszt w PLN", template="plotly_white")
+st.plotly_chart(fig_costs, use_container_width=True)
 
-# Wykres profilu (średni dzień)
-st.markdown("---")
-profil_wykres = df.groupby('Godzina')[['Pobór', 'Nowy_Pobór', 'Generacja_PV']].mean()
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=profil_wykres.index, y=profil_wykres['Pobór'], name="Pobór Pierwotny", line=dict(color='red')))
-fig.add_trace(go.Scatter(x=profil_wykres.index, y=profil_wykres['Nowy_Pobór'], name="Pobór po PV", fill='tozeroy', line=dict(color='green')))
-fig.add_trace(go.Bar(x=profil_wykres.index, y=profil_wykres['Generacja_PV'], name="Generacja PV", opacity=0.3, marker_color='orange'))
-fig.update_layout(title="Średniodobowy efekt instalacji PV", xaxis_title="Godzina", yaxis_title="Energia [kWh]")
-st.plotly_chart(fig, use_container_width=True)
-
-# --- PDF GENERATOR (SKRÓCONY) ---
-def eksport_pdf():
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(200, 10, "Raport Oszczędności PV (B2B)", ln=True, align='C')
-    pdf.set_font("Arial", "", 12)
-    pdf.ln(10)
-    pdf.cell(200, 8, f"Cena energii czynnej: {cena_mwh_netto} PLN/MWh", ln=True)
-    pdf.cell(200, 8, f"Moc instalacji: {moc_pv} kWp", ln=True)
-    pdf.cell(200, 8, f"Taryfa: {taryfa_choice} ({osd_choice})", ln=True)
-    pdf.ln(10)
-    pdf.cell(200, 10, f"ROCZNY ZYSK SUMARYCZNY: {suma_zysk:,.2f} PLN Netto", ln=True)
-    
-    # Naprawa błędu Streamlit bytes
-    pdf_out = pdf.output()
-    return bytes(pdf_out) if not isinstance(pdf_out, str) else pdf_out.encode('latin-1')
-
-st.download_button("📥 Pobierz uproszczony Raport PDF", data=eksport_pdf(), file_name="raport_pv.pdf")
+# 3. Podsumowanie procentowe
+zysk_proc = ((e_przed+d_przed+m_przed)-(e_po+d_po+m_po)) / (e_przed+d_przed+m_przed) * 100
+st.info(f"💡 Instalacja PV obniża całkowite koszty energii Twojego klienta o ok. **{zysk_proc:.1f}%** rocznie.")
