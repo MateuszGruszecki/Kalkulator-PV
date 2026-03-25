@@ -4,11 +4,11 @@ import numpy as np
 import plotly.graph_objects as go
 import io
 
-# --- KONFIGURACJA ---
+# --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Kalkulator PV B2B - Final Fix", layout="wide")
-st.title("⚡ Analiza PV B2B: Bilans i Opłata Mocowa (Dobowa)")
+st.title("⚡ Analiza PV B2B: Bilans Miesięczny i Opłata Mocowa (Dobowa)")
 
-# --- BAZA OSD ---
+# --- BAZA DANYCH OSD ---
 WSPOLNE_NETTO = 0.04346 
 OPLATA_MOCOWA_STAWKA = 0.2194 # 219,40 zł/MWh netto
 
@@ -37,19 +37,38 @@ if uploaded_file:
         raw = uploaded_file.read()
         try: decoded = raw.decode('cp1250')
         except: decoded = raw.decode('utf-8', errors='ignore')
+        
+        # Czytamy plik, pomijając ewentualne puste wiersze nagłówka
         df_raw = pd.read_csv(io.StringIO(decoded), sep=';', decimal=',', engine='python', header=None, skiprows=1)
         
-        if data_type == "15-minutowe":
-            temp = pd.DataFrame({'T': pd.to_datetime(df_raw.iloc[:, 0].astype(str) + ' ' + df_raw.iloc[:, 1].astype(str), dayfirst=True, errors='coerce'), 'V': pd.to_numeric(df_raw.iloc[:, 2], errors='coerce').fillna(0)})
-            df = temp.dropna().set_index('T')['V'].resample('1H').sum().to_frame(name='Pobór').reset_index().rename(columns={'T': 'Timestamp'})
+        # Filtracja pustych wierszy (np. te same średniki na górze)
+        df_raw = df_raw.dropna(how='all').reset_index(drop=True)
+
+        # Pobieramy: Kolumna 0 (Data), Kolumna 1 (Czas), Kolumna 2 (Wartość)
+        # Większość Twoich plików ma ten układ
+        if df_raw.shape[1] >= 3:
+            temp_ts = pd.to_datetime(df_raw.iloc[:, 0].astype(str) + ' ' + df_raw.iloc[:, 1].astype(str), dayfirst=True, errors='coerce')
+            temp_val = pd.to_numeric(df_raw.iloc[:, 2], errors='coerce').fillna(0)
+            
+            temp_df = pd.DataFrame({'T': temp_ts, 'V': temp_val}).dropna(subset=['T'])
+            
+            if data_type == "15-minutowe":
+                df = temp_df.set_index('T')['V'].resample('1H').sum().to_frame(name='Pobór').reset_index().rename(columns={'T': 'Timestamp'})
+            else: # Godzinowe
+                df = temp_df.rename(columns={'T': 'Timestamp', 'V': 'Pobór'}).reset_index(drop=True)
         else:
-            df = pd.DataFrame({'Timestamp': pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True, errors='coerce'), 'Pobór': pd.to_numeric(df_raw.iloc[:, 1], errors='coerce').fillna(0)}).dropna()
-        if len(df) > 0: st.success(f"Wczytano {len(df)} h danych.")
+            # Awaryjnie dla plików 2-kolumnowych (Data; Wartość)
+            df = pd.DataFrame({
+                'Timestamp': pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True, errors='coerce'),
+                'Pobór': pd.to_numeric(df_raw.iloc[:, 1], errors='coerce').fillna(0)
+            }).dropna(subset=['Timestamp'])
+
+        if len(df) > 0: st.success(f"Wczytano {len(df)} h danych z pliku {uploaded_file.name}.")
     except Exception as e: st.error(f"Błąd pliku: {e}")
 
 if df is None:
-    dates = pd.date_range("2026-01-01", periods=8760, freq="h")
-    df = pd.DataFrame({"Timestamp": dates, "Pobór": np.random.uniform(100, 300, 8760)})
+    dates = pd.date_range("2025-01-01", periods=8760, freq="h")
+    df = pd.DataFrame({"Timestamp": dates, "Pobór": np.random.uniform(1000, 3000, 8760)})
 
 # --- OBLICZENIA BILANSU ---
 df['Data'] = df['Timestamp'].dt.date
@@ -58,7 +77,6 @@ df['Roboczy'] = df['Timestamp'].dt.weekday < 5
 df['Miesiąc_Num'] = df['Timestamp'].dt.month
 df['Miesiąc'] = df['Timestamp'].dt.strftime('%m - %b')
 
-# Generacja PV (uproszczona sezonowość)
 sin_p = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12))
 weights = {1: 0.3, 2: 0.5, 3: 0.9, 4: 1.2, 5: 1.5, 6: 1.6, 7: 1.6, 8: 1.4, 9: 1.0, 10: 0.6, 11: 0.3, 12: 0.2}
 df['Waga'] = df['Timestamp'].dt.month.map(weights)
@@ -78,12 +96,10 @@ def calculate_daily_mocowa_safe(sub_df, col_name):
     poza_szczyt = float(sub_df[~sub_df['Is_Szczyt_Mocowy']][col_name].sum())
     total = szczyt + poza_szczyt
     
-    # Bezpiecznik: jeśli total jest 0 (np. słońce pokryło wszystko lub budynek zamknięty)
     if total < 0.0001:
         return pd.Series([0.0, 0.17], index=['Koszt', 'Mnożnik'])
     
     delta = (szczyt - poza_szczyt) / total
-    
     if delta < 0.05: mn = 0.17
     elif delta < 0.10: mn = 0.50
     elif delta < 0.15: mn = 0.83
@@ -118,7 +134,7 @@ def calc_base(col):
 e_p, d_p = calc_base('Pobór')
 e_n, d_n = calc_base('Nowy_Pobór')
 
-# --- WYŚWIETLANIE ---
+# --- PREZENTACJA ---
 st.header(f"📊 Analiza Miesięczna i Dobowa: {osd_choice} {taryfa_choice}")
 
 m_df = df.groupby(['Miesiąc_Num', 'Miesiąc'])[['Pobór', 'Autokonsumpcja', 'Nowy_Pobór', 'Eksport']].sum().reset_index()
@@ -141,11 +157,7 @@ st.table(pd.DataFrame({
 # Analiza K1-K4
 st.markdown("---")
 st.subheader("🧐 Rozkład kategorii mocowych (Dni w miesiącu)")
-st.write("Dzięki PV 500 kWp, w słoneczne dni klient „zeruje” szczyt, wchodząc w kategorię K1 (ulga 83%).")
-
-# Przygotowanie tabeli udziałów kategorii
 mocowa_po['Miesiąc'] = pd.to_datetime(mocowa_po.index).month
 dist_table = mocowa_po.groupby(['Miesiąc', 'Mnożnik']).size().unstack().fillna(0)
-# Zamiana na procenty
 dist_table_pct = dist_table.div(dist_table.sum(axis=1), axis=0) * 100
 st.table(dist_table_pct.style.format("{:.1f}%"))
