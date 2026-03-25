@@ -4,13 +4,13 @@ import numpy as np
 import plotly.graph_objects as go
 import io
 
-# --- KONFIGURACJA ---
+# --- USTAWIENIA STRONY ---
 st.set_page_config(page_title="Kalkulator PV B2B - Final Fix", layout="wide")
 st.title("⚡ Profesjonalna Analiza PV dla Biznesu (Netto 2026)")
 
-# --- STAŁE (Netto 2026) ---
+# --- BAZA DANYCH OSD (Netto 2026) ---
 WSPOLNE_NETTO = 0.04346 
-OPLATA_MOCOWA_NETTO = 0.2194 # 219,40 zł/MWh netto
+OPLATA_MOCOWA_NETTO = 0.2194
 
 osd_data = {
     "PGE": {"B21": {"całodobowa": 0.06446}, "B22": {"szczyt": 0.08512, "pozaszczyt": 0.04467}, "B23": {"przedpołudnie": 0.06611, "popołudnie": 0.12438, "pozostałe": 0.02298}},
@@ -27,45 +27,55 @@ cena_mwh = st.sidebar.number_input("Cena energii (PLN/MWh netto)", value=485.0)
 moc_pv = st.sidebar.number_input("Moc PV (kWp)", value=50.0)
 uzysk = st.sidebar.number_input("Uzysk (kWh/kWp)", value=1000.0)
 
-uploaded_file = st.sidebar.file_uploader("Wgraj Twój plik CSV (15- min.csv)", type=['csv'])
+uploaded_file = st.sidebar.file_uploader("Wgraj plik 15- min.csv", type=['csv'])
 
-# --- LOGIKA WCZYTYWANIA I SYNCHRONIZACJI ---
+# --- „PANCERNE” WCZYTYWANIE I AGREGACJA ---
 main_df = None
 
 if uploaded_file:
     try:
-        # 1. Wczytanie z kodowaniem polskiego Excela
-        raw = uploaded_file.read()
-        df_raw = pd.read_csv(io.BytesIO(raw), sep=';', encoding='cp1250', decimal=',', engine='python')
+        raw_bytes = uploaded_file.read()
+        # Rozwiązanie błędu Unicode (próba cp1250 dla polskich znaków)
+        try:
+            decoded = raw_bytes.decode('cp1250')
+        except:
+            decoded = raw_bytes.decode('utf-8', errors='ignore')
+            
+        # Odczytujemy ignorując nagłówki, by uniknąć problemu z "Wartość przeliczona"
+        df_raw = pd.read_csv(io.StringIO(decoded), sep=';', decimal=',', engine='python', header=None, skiprows=1)
         
-        # 2. Wybieramy kolumny po pozycji: 0 (Data), 1 (Czas), 2 (Wartość)
-        dane = pd.DataFrame({
-            'TS': pd.to_datetime(df_raw.iloc[:, 0].astype(str) + ' ' + df_raw.iloc[:, 1].astype(str), dayfirst=True, errors='coerce'),
-            'Val': pd.to_numeric(df_raw.iloc[:, 2], errors='coerce').fillna(0)
-        }).dropna(subset=['TS'])
-
-        # 3. Agregacja 15 min -> 1h (Resample gwarantuje ciągłość czasu)
-        main_df = dane.set_index('TS')['Val'].resample('1H').sum().reset_index()
+        # Kolumna 0: Data, Kolumna 1: Godzina, Kolumna 2: kWh (wg Twojego screena)
+        temp_df = pd.DataFrame({
+            'Data': df_raw.iloc[:, 0].astype(str),
+            'Czas': df_raw.iloc[:, 1].astype(str),
+            'Wartość': pd.to_numeric(df_raw.iloc[:, 2], errors='coerce').fillna(0)
+        })
+        
+        # Konwersja czasu
+        temp_df['TS'] = pd.to_datetime(temp_df['Data'] + ' ' + temp_df['Czas'], dayfirst=True, errors='coerce')
+        temp_df = temp_df.dropna(subset=['TS']).set_index('TS')
+        
+        # Agregacja 15 min -> 1h
+        main_df = temp_df['Wartość'].resample('1H').sum().to_frame(name='Pobór').reset_index()
         main_df.columns = ['Timestamp', 'Pobór']
         
-        st.success(f"Pomyślnie wczytano dane: {len(main_df)} godzin.")
+        st.success(f"Wczytano i zagregowano {len(main_df)} godzin danych.")
     except Exception as e:
-        st.error(f"Nie udało się odczytać pliku: {e}")
+        st.error(f"Błąd krytyczny pliku: {e}")
 
-# Dane testowe (awaryjne)
+# Dane testowe jeśli brak pliku
 if main_df is None:
     dates = pd.date_range("2026-01-01", periods=8760, freq="h")
     main_df = pd.DataFrame({"Timestamp": dates, "Pobór": np.random.uniform(20, 60, 8760)})
 
-# --- OBLICZENIA (Gwarantowana zgodność długości) ---
+# --- OBLICZENIA ---
 main_df['Godzina'] = main_df['Timestamp'].dt.hour
 main_df['Roboczy'] = main_df['Timestamp'].dt.weekday < 5
 
-# Produkcja PV (Dopasowana DOKŁADNIE do długości wczytanego pliku)
-sin_curve = np.maximum(0, np.sin((main_df['Godzina'] - 6) * np.pi / 12))
-# Produkcja roczna skalowana do długości danych w pliku
-total_prod_for_period = (moc_pv * uzysk) * (len(main_df) / 8760)
-main_df['Generacja_PV'] = (sin_curve / sin_curve.sum() * total_prod_for_period) if sin_curve.sum() > 0 else 0
+# Produkcja PV - dynamicznie do długości pliku
+sin_profile = np.maximum(0, np.sin((main_df['Godzina'] - 6) * np.pi / 12))
+total_pv = (moc_pv * uzysk) * (len(main_df) / 8760)
+main_df['Generacja_PV'] = (sin_profile / sin_profile.sum() * total_pv) if sin_profile.sum() > 0 else 0
 main_df['Nowy_Pobór'] = np.maximum(0, main_df['Pobór'] - main_df['Generacja_PV'])
 
 # Strefy
@@ -75,16 +85,13 @@ def get_strefa(row):
     if taryfa_choice == "B22": return "szczyt" if (6 <= h < 21) and rob else "pozaszczyt"
     if taryfa_choice == "B23":
         if not rob: return "pozostałe"
-        if 7 <= h < 13: return "przedpołudnie"
-        if 16 <= h < 21: return "popołudnie"
-        return "pozostałe"
+        return "przedpołudnie" if 7 <= h < 13 else ("popołudnie" if 16 <= h < 21 else "pozostałe")
     return "całodobowa"
 
 main_df['Strefa'] = main_df.apply(get_strefa, axis=1)
 main_df['Godzina_Mocowa'] = (main_df['Godzina'] >= 7) & (main_df['Godzina'] < 22) & main_df['Roboczy']
 
-# Kalkulacja
-def calc(col):
+def run_calc(col):
     en = main_df[col].sum() * (cena_mwh / 1000)
     dys = sum(main_df[main_df['Strefa'] == s][col].sum() * (osd_data[osd_choice][taryfa_choice][s] + WSPOLNE_NETTO) for s in osd_data[osd_choice][taryfa_choice])
     sz_m = main_df[main_df['Godzina_Mocowa']][col].sum()
@@ -94,12 +101,11 @@ def calc(col):
     moc = sz_m * OPLATA_MOCOWA_NETTO * mn
     return en, dys, moc, mn, sz_m
 
-e_p, d_p, m_p, mn_p, sz_p = calc('Pobór')
-e_n, d_n, m_n, mn_n, sz_n = calc('Nowy_Pobór')
+e_p, d_p, m_p, mn_p, sz_p = run_calc('Pobór')
+e_n, d_n, m_n, mn_n, sz_n = run_calc('Nowy_Pobór')
 
 # --- PREZENTACJA ---
-st.header(f"💰 Analiza Wyników (Netto)")
-
+st.header("💰 Wyniki Analizy Kosztów (Netto)")
 st.table(pd.DataFrame({
     "Kategoria": ["Energia czynna", "Dystrybucja", "Opłata mocowa", "SUMA"],
     "PRZED PV": [e_p, d_p, m_p, e_p+d_p+m_p],
@@ -108,7 +114,7 @@ st.table(pd.DataFrame({
 }).set_index("Kategoria").style.format("{:,.2f}"))
 
 st.markdown("---")
-st.subheader("⚡ Opłata Mocowa K1-K4")
+st.subheader("⚡ Analiza Opłaty Mocowej (K1-K4)")
 cl, cr = st.columns(2)
 def draw_m(sz, mn_a):
     mns = [0.17, 0.50, 0.83, 1.00]
@@ -121,11 +127,17 @@ cr.write("**PO PV**")
 cr.table(draw_m(sz_n, mn_n))
 
 st.markdown("---")
-# Wykres profilu - Agregacja do 24 punktów (Gwarantuje stałą długość)
-avg = main_df.groupby('Godzina')[['Pobór', 'Nowy_Pobór', 'Generacja_PV']].mean().reindex(range(24)).fillna(0)
+# WYKRES: Ręczne budowanie tablic, aby wyeliminować błąd "Length mismatch"
+avg_p, avg_n, avg_v = [], [], []
+for h in range(24):
+    m = main_df['Godzina'] == h
+    avg_p.append(main_df.loc[m, 'Pobór'].mean() if m.any() else 0)
+    avg_n.append(main_df.loc[m, 'Nowy_Pobór'].mean() if m.any() else 0)
+    avg_v.append(main_df.loc[m, 'Generacja_PV'].mean() if m.any() else 0)
+
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=avg.index, y=avg['Pobór'], name="Przed PV", line=dict(color='red')))
-fig.add_trace(go.Scatter(x=avg.index, y=avg['Nowy_Pobór'], name="Po PV", fill='tozeroy', line=dict(color='green')))
-fig.add_trace(go.Bar(x=avg.index, y=avg['Generacja_PV'], name="PV", opacity=0.3, marker_color='orange'))
+fig.add_trace(go.Scatter(x=list(range(24)), y=avg_p, name="Przed PV", line=dict(color='red')))
+fig.add_trace(go.Scatter(x=list(range(24)), y=avg_n, name="Po PV", fill='tozeroy', line=dict(color='green')))
+fig.add_trace(go.Bar(x=list(range(24)), y=avg_v, name="PV", opacity=0.3, marker_color='orange'))
 fig.update_layout(title="Średni profil dobowy (kWh)", xaxis=dict(dtick=1, title="Godzina"), template="plotly_white")
 st.plotly_chart(fig, use_container_width=True)
