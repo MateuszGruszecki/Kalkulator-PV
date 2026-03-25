@@ -1,0 +1,9 @@
+OSD,Taryfa,Skladnik,Cena_PLN_MWh
+PGE,B21,Zmienna_calodobowa,79.29
+PGE,B21,Jakosciowa,40.66
+PGE,B21,Stala_sieciowa_MW_msc,22668.80
+PGE,B23,Szczyt_przedpoludniowy,81.32
+PGE,B23,Szczyt_popoludniowy,152.99
+PGE,B23,Pozaszczytowa,28.27
+Tauron,B21,Zmienna_calodobowa,85.00
+Tauron,B21,Jakosciowa,42.00
