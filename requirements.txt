@@ -1,4 +1,6 @@
 streamlit
 pandas
-plotly
 numpy
+plotly
+fpdf2
+requests
