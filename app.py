@@ -4,11 +4,11 @@ import numpy as np
 import plotly.graph_objects as go
 import io
 
-# --- KONFIGURACJA STRONY ---
+# --- KONFIGURACJA ---
 st.set_page_config(page_title="Kalkulator PV B2B - Final Fix", layout="wide")
-st.title("⚡ Analiza PV B2B: Bilans Miesięczny i Opłata Mocowa (Netto 2026)")
+st.title("⚡ Analiza PV B2B: Bilans i Opłata Mocowa (Dobowa)")
 
-# --- BAZA DANYCH OSD ---
+# --- BAZA OSD ---
 WSPOLNE_NETTO = 0.04346 
 OPLATA_MOCOWA_STAWKA = 0.2194 # 219,40 zł/MWh netto
 
@@ -55,9 +55,10 @@ if df is None:
 df['Data'] = df['Timestamp'].dt.date
 df['Godzina'] = df['Timestamp'].dt.hour
 df['Roboczy'] = df['Timestamp'].dt.weekday < 5
+df['Miesiąc_Num'] = df['Timestamp'].dt.month
 df['Miesiąc'] = df['Timestamp'].dt.strftime('%m - %b')
 
-# Generacja PV (sezonowość)
+# Generacja PV (uproszczona sezonowość)
 sin_p = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12))
 weights = {1: 0.3, 2: 0.5, 3: 0.9, 4: 1.2, 5: 1.5, 6: 1.6, 7: 1.6, 8: 1.4, 9: 1.0, 10: 0.6, 11: 0.3, 12: 0.2}
 df['Waga'] = df['Timestamp'].dt.month.map(weights)
@@ -69,18 +70,17 @@ df['Autokonsumpcja'] = np.minimum(df['Pobór'], df['Generacja_PV'])
 df['Nowy_Pobór'] = np.maximum(0, df['Pobór'] - df['Autokonsumpcja'])
 df['Eksport'] = np.maximum(0, df['Generacja_PV'] - df['Pobór'])
 
-# --- OPŁATA MOCOWA (LOGIKA DOBOWA Z ZABEZPIECZENIEM) ---
+# --- OPŁATA MOCOWA (LOGIKA DOBOWA) ---
 df['Is_Szczyt_Mocowy'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy']
 
-def calculate_daily_mocowa_safe(sub_df):
-    szczyt = sub_df[sub_df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
-    poza_szczyt = sub_df[~sub_df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
+def calculate_daily_mocowa_safe(sub_df, col_name):
+    szczyt = float(sub_df[sub_df['Is_Szczyt_Mocowy']][col_name].sum())
+    poza_szczyt = float(sub_df[~sub_df['Is_Szczyt_Mocowy']][col_name].sum())
     total = szczyt + poza_szczyt
     
-    # Bezpiecznik: jeśli total jest 0 (klient nie pobiera nic z sieci), stawka mnożnikowa nie ma znaczenia, 
-    # ale przyjmujemy K1 (najniższą), aby uniknąć ZeroDivisionError
-    if total <= 1e-6: 
-        return 0.0, 0.17 
+    # Bezpiecznik: jeśli total jest 0 (np. słońce pokryło wszystko lub budynek zamknięty)
+    if total < 0.0001:
+        return pd.Series([0.0, 0.17], index=['Koszt', 'Mnożnik'])
     
     delta = (szczyt - poza_szczyt) / total
     
@@ -89,18 +89,16 @@ def calculate_daily_mocowa_safe(sub_df):
     elif delta < 0.15: mn = 0.83
     else: mn = 1.0
     
-    return szczyt * OPLATA_MOCOWA_STAWKA * mn, mn
+    return pd.Series([szczyt * OPLATA_MOCOWA_STAWKA * mn, mn], index=['Koszt', 'Mnożnik'])
 
-# Obliczenia dla Nowego Poboru (Po PV)
-daily_stats = df.groupby('Data').apply(lambda x: pd.Series(calculate_daily_mocowa_safe(x)))
-daily_stats.columns = ['Koszt_Mocowy', 'Mnożnik']
-total_mocowa_po = daily_stats['Koszt_Mocowy'].sum()
+# Grupowanie dobowe
+mocowa_po = df.groupby('Data').apply(lambda x: calculate_daily_mocowa_safe(x, 'Nowy_Pobór'))
+mocowa_pre = df.groupby('Data').apply(lambda x: calculate_daily_mocowa_safe(x, 'Pobór'))
 
-# Obliczenia dla Poboru Pierwotnego (Przed PV)
-daily_stats_pre = df.groupby('Data').apply(lambda x: pd.Series(calculate_daily_mocowa_safe(x.assign(Nowy_Pobór=x['Pobór']))))
-total_mocowa_przed = daily_stats_pre[0].sum()
+total_mocowa_po = mocowa_po['Koszt'].sum()
+total_mocowa_przed = mocowa_pre['Koszt'].sum()
 
-# --- FINANSE POZOSTAŁE ---
+# --- FINANSE ---
 def get_strefa(row):
     h, rob = row['Godzina'], row['Roboczy']
     if taryfa_choice == "B21": return "całodobowa"
@@ -121,20 +119,18 @@ e_p, d_p = calc_base('Pobór')
 e_n, d_n = calc_base('Nowy_Pobór')
 
 # --- WYŚWIETLANIE ---
-st.header(f"📊 Analiza Miesięczna i Finansowa: {osd_choice} {taryfa_choice}")
+st.header(f"📊 Analiza Miesięczna i Dobowa: {osd_choice} {taryfa_choice}")
 
-# Wykres Miesięczny
-m_df = df.groupby('Miesiąc')[['Pobór', 'Autokonsumpcja', 'Nowy_Pobór', 'Eksport']].sum().reset_index()
+m_df = df.groupby(['Miesiąc_Num', 'Miesiąc'])[['Pobór', 'Autokonsumpcja', 'Nowy_Pobór', 'Eksport']].sum().reset_index()
 fig = go.Figure()
-fig.add_trace(go.Bar(x=m_df['Miesiąc'], y=m_df['Pobór'], name="Pobór (oryginalny)", marker_color='#E74C3C'))
-fig.add_trace(go.Bar(x=m_df['Miesiąc'], y=m_df['Autokonsumpcja'], name="Autokonsumpcja (zysk)", marker_color='#2ECC71'))
-fig.add_trace(go.Bar(x=m_df['Miesiąc'], y=m_df['Nowy_Pobór'], name="Zakup z sieci (Po PV)", marker_color='#3498DB'))
+fig.add_trace(go.Bar(x=m_df['Miesiąc'], y=m_df['Pobór'], name="Pobór Pierwotny", marker_color='#E74C3C'))
+fig.add_trace(go.Bar(x=m_df['Miesiąc'], y=m_df['Autokonsumpcja'], name="Autokonsumpcja", marker_color='#2ECC71'))
+fig.add_trace(go.Bar(x=m_df['Miesiąc'], y=m_df['Nowy_Pobór'], name="Zakup po PV", marker_color='#3498DB'))
 fig.add_trace(go.Bar(x=m_df['Miesiąc'], y=m_df['Eksport'], name="Nadwyżka (Eksport)", marker_color='#F1C40F', opacity=0.4))
-fig.update_layout(barmode='group', template="plotly_white", title="Miesięczne zestawienie energii [kWh]")
+fig.update_layout(barmode='group', template="plotly_white", title="Energia w skali miesiąca [kWh]")
 st.plotly_chart(fig, use_container_width=True)
 
-# Tabela Finansowa
-st.subheader("💰 Oszczędności Roczne (Netto)")
+st.subheader("💰 Bilans Oszczędności Rocznych (Netto)")
 st.table(pd.DataFrame({
     "Składnik": ["Energia czynna", "Dystrybucja zmienna", "Opłata mocowa (DOBOWA)", "RAZEM"],
     "PRZED PV [PLN]": [e_p, d_p, total_mocowa_przed, e_p+d_p+total_mocowa_przed],
@@ -144,12 +140,12 @@ st.table(pd.DataFrame({
 
 # Analiza K1-K4
 st.markdown("---")
-st.subheader("🧐 Rozkład kategorii mocowych w skali roku")
-st.write("Tabela pokazuje, przez jaki procent dni w danym miesiącu klient wpada w konkretną kategorię ulgi (K1=17%, K4=100% stawki).")
+st.subheader("🧐 Rozkład kategorii mocowych (Dni w miesiącu)")
+st.write("Dzięki PV 500 kWp, w słoneczne dni klient „zeruje” szczyt, wchodząc w kategorię K1 (ulga 83%).")
 
-hist_data = pd.DataFrame({
-    "Miesiąc": df['Timestamp'].dt.month,
-    "Mnożnik": daily_stats['Mnożnik'].values
-}).groupby('Miesiąc')['Mnożnik'].value_counts(normalize=True).unstack().fillna(0) * 100
-
-st.table(hist_data.style.format("{:.1f}%"))
+# Przygotowanie tabeli udziałów kategorii
+mocowa_po['Miesiąc'] = pd.to_datetime(mocowa_po.index).month
+dist_table = mocowa_po.groupby(['Miesiąc', 'Mnożnik']).size().unstack().fillna(0)
+# Zamiana na procenty
+dist_table_pct = dist_table.div(dist_table.sum(axis=1), axis=0) * 100
+st.table(dist_table_pct.style.format("{:.1f}%"))
