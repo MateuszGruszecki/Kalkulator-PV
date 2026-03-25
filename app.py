@@ -60,7 +60,6 @@ else:
     df.columns = ["Data", "Pobór"]
     df["Pobór"] = pd.to_numeric(df["Pobór"], errors='coerce').fillna(0)
 
-# Symulacja PV i Bilans
 df['Godzina'] = np.arange(len(df)) % 24
 df['Roboczy'] = pd.to_datetime(np.arange(len(df)), unit='h', origin='2026-01-01').weekday < 5
 
@@ -68,7 +67,6 @@ profil_dzienny = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12))
 df['Generacja_PV'] = (profil_dzienny / profil_dzienny.sum()) * (moc_pv * uzysk)
 df['Nowy_Pobór'] = np.maximum(0, df['Pobór'] - df['Generacja_PV'])
 
-# Strefy i Mocowa
 def get_strefa(row):
     h, rob = row['Godzina'], row['Roboczy']
     if taryfa_choice == "B21": return "całodobowa"
@@ -84,19 +82,26 @@ df['Godzina_Mocowa'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy
 def kalkulacja(col):
     en = df[col].sum() * cena_kwh_netto
     dys = sum(df[df['Strefa'] == s][col].sum() * stawki_dyst[s] for s in stawki_dyst)
-    sz_m, pz_m = df[df['Godzina_Mocowa']][col].sum(), df[~df['Godzina_Mocowa']][col].sum()
-    calkowite = sz_m + pz_m
-    delta = (sz_m - pz_m) / calkowite if calkowite > 0 else 0
-    mnoznik = 0.17 if delta < 0.05 else (0.5 if delta < 0.10 else (0.83 if delta < 0.15 else 1.0))
-    moc = sz_m * OPLATA_MOCOWA_2026 * mnoznik
-    return en, dys, moc, delta, mnoznik
+    
+    sz_m = df[df['Godzina_Mocowa']][col].sum()
+    poza_m = df[~df['Godzina_Mocowa']][col].sum()
+    calkowite = sz_m + poza_m
+    delta = (sz_m - poza_m) / calkowite if calkowite > 0 else 0
+    
+    # Kwalifikacja
+    if delta < 0.05: kat, mn = "K1", 0.17
+    elif delta < 0.10: kat, mn = "K2", 0.50
+    elif delta < 0.15: kat, mn = "K3", 0.83
+    else: kat, mn = "K4", 1.00
+    
+    moc_final = sz_m * OPLATA_MOCOWA_2026 * mn
+    return en, dys, moc_final, delta, kat, sz_m
 
-e_przed, d_przed, m_przed, delta_przed, mn_przed = kalkulacja('Pobór')
-e_po, d_po, m_po, delta_po, mn_po = kalkulacja('Nowy_Pobór')
+e_przed, d_przed, m_przed, delta_przed, kat_przed, sz_m_przed = kalkulacja('Pobór')
+e_po, d_po, m_po, delta_po, kat_po, sz_m_po = kalkulacja('Nowy_Pobór')
 
-# --- PREZENTACJA: SEKCOJA FINANSOWA ---
+# --- PREZENTACJA: FINANSE ---
 st.header("💰 Analiza Finansowa (Netto)")
-
 col_a, col_b = st.columns([2, 1])
 
 with col_a:
@@ -110,20 +115,53 @@ with col_a:
     st.table(pd.DataFrame(data_compare))
 
 with col_b:
-    st.subheader("📊 Struktura Kosztów")
     categories = ["Energia", "Dystrybucja", "Mocowa"]
     fig_costs = go.Figure(data=[
         go.Bar(name='Przed', x=categories, y=[e_przed, d_przed, m_przed], marker_color='#E74C3C'),
         go.Bar(name='Po', x=categories, y=[e_po, d_po, m_po], marker_color='#2ECC71')
     ])
-    fig_costs.update_layout(barmode='group', height=300, margin=dict(l=20, r=20, t=20, b=20))
+    fig_costs.update_layout(barmode='group', height=300, margin=dict(l=20, r=20, t=20, b=20), template="plotly_white")
     st.plotly_chart(fig_costs, use_container_width=True)
 
-# --- PREZENTACJA: PROFIL ENERGETYCZNY ---
+# --- NOWA SEKCJA: SZCZEGÓŁY OPŁATY MOCOWEJ ---
 st.markdown("---")
-st.header("☀️ Charakterystyka Energetyczna")
+st.header("⚡ Szczegółowa Analiza Opłaty Mocowej")
 
-# Wykres profilu (średni dzień)
+col_m1, col_m2 = st.columns(2)
+
+def generate_mocowa_table(sz_m_val, current_kat):
+    kategorie = ["K1 (17%)", "K2 (50%)", "K3 (83%)", "K4 (100%)"]
+    mnozniki = [0.17, 0.50, 0.83, 1.00]
+    koszty = [sz_m_val * OPLATA_MOCOWA_2026 * m for m in mnozniki]
+    
+    df_m = pd.DataFrame({
+        "Stawka": kategorie,
+        "Koszt roczny [PLN]": [f"{k:,.2f}".replace(',', ' ') for k in koszty]
+    })
+    
+    # Funkcja do podświetlania aktualnej kategorii
+    def highlight_row(row):
+        return ['background-color: #d1f2d1' if current_kat in row['Stawka'] else '' for _ in row]
+    
+    return df_m.style.apply(highlight_row, axis=1)
+
+with col_m1:
+    st.subheader("PRZED INSTALACJĄ PV")
+    st.write(f"Pobór w godz. mocowych: **{sz_m_przed/1000:,.2f} MWh**")
+    st.write(f"Aktualna kategoria: **{kat_przed}**")
+    st.table(generate_mocowa_table(sz_m_przed, kat_przed))
+
+with col_m2:
+    st.subheader("PO INSTALACJI PV")
+    st.write(f"Pobór w godz. mocowych: **{sz_m_po/1000:,.2f} MWh**")
+    st.write(f"Nowa kategoria: **{kat_po}**")
+    st.table(generate_mocowa_table(sz_m_po, kat_po))
+
+st.info(f"**Wniosek:** Instalacja PV zredukowała wolumen podlegający opłacie mocowej o **{(sz_m_przed-sz_m_po)/1000:,.2f} MWh** rocznie.")
+
+# --- PROFIL ENERGETYCZNY ---
+st.markdown("---")
+st.header("☀️ Charakterystyka Energetyczna (Średni Dzień)")
 sredni_dzien = df.groupby('Godzina')[['Pobór', 'Nowy_Pobór', 'Generacja_PV']].mean()
 
 fig_prof = go.Figure()
@@ -131,19 +169,5 @@ fig_prof.add_trace(go.Scatter(x=sredni_dzien.index, y=sredni_dzien['Pobór'], na
 fig_prof.add_trace(go.Scatter(x=sredni_dzien.index, y=sredni_dzien['Nowy_Pobór'], name="Pobór po PV", fill='tozeroy', line=dict(color='#2ECC71', width=2)))
 fig_prof.add_trace(go.Bar(x=sredni_dzien.index, y=sredni_dzien['Generacja_PV'], name="Generacja PV", opacity=0.4, marker_color='orange'))
 
-fig_prof.update_layout(
-    title="Średniodobowy profil przepływu energii",
-    xaxis_title="Godzina",
-    yaxis_title="Moc / Energia [kWh]",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    template="plotly_white"
-)
+fig_prof.update_layout(xaxis_title="Godzina", yaxis_title="Energia [kWh]", template="plotly_white", legend=dict(orientation="h", y=1.1))
 st.plotly_chart(fig_prof, use_container_width=True)
-
-# Dodatkowe info o mocowej
-st.info(f"""
-**Analiza Opłaty Mocowej (2026):**
-* Współczynnik Δ przed PV: **{delta_przed:.3f}** (Mnożnik: {mn_przed})
-* Współczynnik Δ po PV: **{delta_po:.3f}** (Mnożnik: {mn_po})
-* PV obniżyło pobór w godzinach szczytowych o **{df['Pobór'].sum() - df['Nowy_Pobór'].sum():,.1f} kWh**.
-""")
