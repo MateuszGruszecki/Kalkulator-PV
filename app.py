@@ -183,11 +183,15 @@ st.markdown("---")
 st.subheader("📄 Generowanie Raportu PDF")
 
 def pobierz_czcionke():
-    font_path = "DejaVuSans.ttf"
+    # Zmieniamy nazwę pliku, żeby zignorować stary, zepsuty pobrany plik
+    font_path = "Czcionka_PL.ttf" 
+    
     if not os.path.exists(font_path):
-        url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+        # Używamy prawidłowego linku RAW (bezpośrednio do pliku binarnego)
+        url = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans.ttf"
         r = requests.get(url, allow_redirects=True)
         open(font_path, 'wb').write(r.content)
+        
     return font_path
 
 def stworz_raport_pdf():
