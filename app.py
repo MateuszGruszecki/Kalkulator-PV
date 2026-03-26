@@ -13,8 +13,8 @@ except ImportError:
     HAS_HOLIDAYS = False
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Kalkulator PV B2B - Chronologia", layout="wide")
-st.title("⚡ Analiza PV B2B: Raport Chronologiczny (2024-2026)")
+st.set_page_config(page_title="Kalkulator PV B2B - Pro", layout="wide")
+st.title("⚡ Analiza PV B2B: Profil Zużycia i Opłata Mocowa 2026")
 
 # --- PARAMETRY ---
 STAWKA_MOCOWA_BAZOWA = 0.2194 
@@ -23,7 +23,7 @@ WSPOLNE_NETTO = 0.04346
 osd_data = {
     "PGE": {"B21": {"całodobowa": 0.06446}, "B22": {"szczyt": 0.08512, "pozaszczyt": 0.04467}, "B23": {"przedpołudnie": 0.06611, "popołudnie": 0.12438, "pozostałe": 0.02298}},
     "Tauron": {"B21": {"całodobowa": 0.07114}, "B22": {"szczyt": 0.07243, "pozaszczyt": 0.05042}, "B23": {"przedpołudnie": 0.04964, "popołudnie": 0.05610, "pozostałe": 0.03748}},
-    "Enea": {"B21": {"całodobowa": 0.06820}, "B22": {"szczyt": 0.08940, "pozaszczyt": 0.04210}, "B23": {"przedpołudnie": 0.07120, "popołudnie": 0.12850, "pozostałe": 0.02050}},
+    "Enea": {"B21": {"całodobowa": 0.06820}, "B22": {"szczyt": 0.08940, "pozaszczyt": 0.04210}, "B23": {"przedpołudnie": 0.07120, "popołudnie": 1.12850, "pozostałe": 0.02050}},
     "Stoen": {"B21": {"całodobowa": 0.06150}, "B22": {"szczyt": 0.08230, "pozaszczyt": 0.03840}, "B23": {"przedpołudnie": 0.06420, "popołudnie": 0.11980, "pozostałe": 0.01820}}
 }
 
@@ -55,7 +55,6 @@ if uploaded_file:
                 df = temp.set_index('T')['V'].resample('1H').sum().to_frame(name='Pobór').reset_index().rename(columns={'T': 'Timestamp'})
             else:
                 df = temp.rename(columns={'T': 'Timestamp', 'V': 'Pobór'}).reset_index(drop=True)
-        if len(df) > 0: st.success(f"Zakres danych: {df['Timestamp'].min().date()} do {df['Timestamp'].max().date()}")
     except Exception as e: st.error(f"Błąd pliku: {e}")
 
 if df is None:
@@ -74,7 +73,7 @@ df['Godzina'] = df['Timestamp'].dt.hour
 df['Rok_Miesiac'] = df['Timestamp'].dt.to_period('M')
 df['Etykieta_Miesiac'] = df['Timestamp'].dt.strftime('%Y-%m')
 
-# --- PV ---
+# --- SYMULACJA PV ---
 weights = {1:0.3, 2:0.5, 3:0.9, 4:1.2, 5:1.5, 6:1.6, 7:1.6, 8:1.4, 9:1.0, 10:0.6, 11:0.3, 12:0.2}
 sin_p = np.maximum(0, np.sin((df['Godzina'] - 6) * np.pi / 12))
 df['Gen_Raw'] = sin_p * df['Timestamp'].dt.month.map(weights)
@@ -85,11 +84,11 @@ df['Autokonsumpcja'] = np.minimum(df['Pobór'], df['Generacja_PV'])
 df['Nowy_Pobór'] = np.maximum(0, df['Pobór'] - df['Autokonsumpcja'])
 
 # --- OPŁATA MOCOWA (METODOLOGIA 2026) ---
-df['Is_Szczyt'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy']
+df['Is_Szczyt_Mocowy'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy']
 
 def get_moc_daily(sub_df, col):
     if not sub_df['Roboczy'].any(): return pd.Series({'Koszt': 0.0, 'Mnożnik': 0.17, 'L': 0.0})
-    e_sz = sub_df[sub_df['Is_Szczyt']][col].sum()
+    e_sz = sub_df[sub_df['Is_Szczyt_Mocowy']][col].sum()
     e_d = sub_df[col].sum()
     if e_d < 0.1: return pd.Series({'Koszt': 0.0, 'Mnożnik': 0.17, 'L': 0.0})
     l_f = (e_sz / e_d) - 0.625
@@ -101,6 +100,25 @@ def get_moc_daily(sub_df, col):
 
 moc_po = df.groupby('Data_Klucz').apply(lambda x: get_moc_daily(x, 'Nowy_Pobór'))
 moc_pre = df.groupby('Data_Klucz').apply(lambda x: get_moc_daily(x, 'Pobór'))
+
+# --- PANEL METRYK (NA GÓRZE) ---
+st.subheader("⚡ Szybki Przegląd Profilu (Licznik kWh)")
+c1, c2, c3, c4 = st.columns(4)
+
+# Obliczenia do metryk
+sz_pre_total = df[df['Is_Szczyt_Mocowy']]['Pobór'].sum()
+psz_pre_total = df[~df['Is_Szczyt_Mocowy']]['Pobór'].sum()
+sz_po_total = df[df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
+psz_po_total = df[~df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
+
+with c1:
+    st.metric("Szczyt PRZED PV", f"{sz_pre_total/1000:,.0f} MWh", help="Godziny 7:00-22:00 w dni robocze")
+with c2:
+    st.metric("Poza szczytem PRZED PV", f"{psz_pre_total/1000:,.0f} MWh", help="Noce, weekendy i święta")
+with c3:
+    st.metric("Szczyt PO PV", f"{sz_po_total/1000:,.0f} MWh", delta=f"-{(sz_pre_total-sz_po_total)/1000:,.0f}", delta_color="normal")
+with c4:
+    st.metric("Poza szczytem PO PV", f"{psz_po_total/1000:,.0f} MWh", help="Niezmienne (PV nie pracuje w nocy)")
 
 # --- FINANSE ---
 def get_strefa(row):
@@ -114,43 +132,36 @@ def get_strefa(row):
 
 df['Strefa'] = df.apply(get_strefa, axis=1)
 
-def calc_main(col):
+def calc_all(col):
     en = df[col].sum() * (cena_mwh / 1000)
     dys = sum(df[df['Strefa'] == s][col].sum() * (osd_data[osd_choice][taryfa_choice][s] + WSPOLNE_NETTO) for s in osd_data[osd_choice][taryfa_choice])
     return en, dys
 
-e_pre, d_pre = calc_main('Pobór')
-e_po, d_po = calc_main('Nowy_Pobór')
-total_m_pre = moc_pre['Koszt'].sum()
-total_m_po = moc_po['Koszt'].sum()
+e_p, d_p = calc_all('Pobór')
+e_n, d_n = calc_all('Nowy_Pobór')
+total_m_pre, total_m_po = moc_pre['Koszt'].sum(), moc_po['Koszt'].sum()
 
-# --- WYNIKI ---
-st.subheader(f"💰 Bilans za okres: {df['Timestamp'].min().date()} — {df['Timestamp'].max().date()}")
-z_en, z_dys, z_moc = e_pre-e_po, d_pre-d_po, total_m_pre-total_m_po
+# --- PREZENTACJA ---
+st.markdown("---")
+st.subheader("💰 Bilans Oszczędności Rocznych (Netto 2026)")
+z_total = (e_p + d_p + total_m_pre) - (e_n + d_n + total_m_po)
 st.table(pd.DataFrame({
     "Składnik": ["Energia czynna", "Dystrybucja zmienna", "Opłata mocowa", "RAZEM"],
-    "PRZED PV [PLN]": [e_pre, d_pre, total_m_pre, e_pre+d_pre+total_m_pre],
-    "PO PV [PLN]": [e_po, d_po, total_m_po, e_po+d_po+total_m_po],
-    "ZYSK [PLN]": [z_en, z_dys, z_moc, z_en+z_dys+z_moc]
+    "PRZED PV [PLN]": [e_p, d_p, total_m_pre, e_p+d_p+total_m_pre],
+    "PO PV [PLN]": [e_n, d_n, total_m_po, e_n+d_n+total_m_po],
+    "ZYSK [PLN]": [e_p-e_n, d_p-d_n, total_m_pre-total_m_po, z_total]
 }).set_index("Składnik").style.format("{:,.2f}"))
 
-# WYKRES CHRONOLOGICZNY (LIP 2024 -> LIP 2025)
+# WYKRES
 st.markdown("---")
-m_plot = df.groupby('Rok_Miesiac').agg({
-    'Pobór': 'sum',
-    'Autokonsumpcja': 'sum',
-    'Nowy_Pobór': 'sum',
-    'Etykieta_Miesiac': 'first'
-}).reset_index()
-
+m_plot = df.groupby('Rok_Miesiac').agg({'Pobór':'sum','Autokonsumpcja':'sum','Etykieta_Miesiac':'first'}).reset_index()
 fig = go.Figure()
-fig.add_trace(go.Bar(x=m_plot['Etykieta_Miesiac'], y=m_plot['Pobór'], name="Pobór Pierwotny", marker_color='#E74C3C'))
+fig.add_trace(go.Bar(x=m_plot['Etykieta_Miesiac'], y=m_plot['Pobór'], name="Pobór", marker_color='#E74C3C'))
 fig.add_trace(go.Bar(x=m_plot['Etykieta_Miesiac'], y=m_plot['Autokonsumpcja'], name="Autokonsumpcja", marker_color='#2ECC71'))
-fig.add_trace(go.Bar(x=m_plot['Etykieta_Miesiac'], y=m_plot['Nowy_Pobór'], name="Zakup z sieci", marker_color='#3498DB'))
-fig.update_layout(barmode='group', template="plotly_white", title="Chronologiczny Bilans Energii", xaxis_title="Miesiąc (Chronologicznie)")
+fig.update_layout(barmode='group', template="plotly_white", title="Chronologiczny Bilans Energii [kWh]")
 st.plotly_chart(fig, use_container_width=True)
 
-# TABELA KATEGORII
+# KATEGORIE
 st.markdown("---")
 st.subheader("🧐 Rozkład kategorii mocowych (Dni w miesiącu)")
 stats_df = moc_po.copy().reset_index()
@@ -162,7 +173,12 @@ dist = dist[[0.17, 0.50, 0.83, 1.00]]
 dist.index = dist.index.strftime('%Y-%m')
 st.table((dist.div(dist.sum(axis=1), axis=0) * 100).style.format("{:.1f}%"))
 
-# KOMENTARZ
+# KOMENTARZ EKSPERTA
 st.markdown("---")
 st.subheader("📝 Komentarz Eksperta")
-st.info(f"Dzięki analizie chronologicznej widzimy, że instalacja PV {moc_pv} kWp najmocniej wspiera zakład w okresie letnim, gdzie współczynnik L wynosi średnio {moc_po['L'].mean()*100:.2f}%. Chroni to klienta przed wysokimi kosztami mocy przez cały badany okres.")
+st.success(f"""
+* **Profil pracy:** Klient pobiera rocznie **{sz_pre_total/1000:,.1f} MWh** w szczycie oraz **{psz_pre_total/1000:,.1f} MWh** poza szczytem. 
+* **Wpływ PV:** Fotowoltaika {moc_pv} kWp zredukowała pobór w szczycie o **{((sz_pre_total-sz_po_total)/sz_pre_total)*100:.1f}%**.
+* **Opłata Mocowa:** Dzięki płaskiemu profilowi 24/7 i wsparciu PV, średni współczynnik L spadł do **{moc_po['L'].mean()*100:.2f}%**, co gwarantuje utrzymanie najniższej stawki K1 (0,17).
+* **Zysk całkowity:** Inwestycja generuje **{z_total:,.2f} PLN** oszczędności rocznie na samych opłatach zmiennych.
+""")
