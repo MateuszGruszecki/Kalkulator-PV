@@ -12,8 +12,8 @@ try:
 except ImportError:
     HAS_HOLIDAYS = False
 
-# --- KONFIGURACJA ---
-st.set_page_config(page_title="Kalkulator PV B2B - Pro", layout="wide")
+# --- KONFIGURACJA STRONY ---
+st.set_page_config(page_title="Kalkulator PV B2B - Audyt", layout="wide")
 st.title("⚡ Analiza PV B2B: Profil Zużycia i Opłata Mocowa 2026")
 
 # --- PARAMETRY ---
@@ -24,11 +24,11 @@ osd_data = {
     "PGE": {"B21": {"całodobowa": 0.06446}, "B22": {"szczyt": 0.08512, "pozaszczyt": 0.04467}, "B23": {"przedpołudnie": 0.06611, "popołudnie": 0.12438, "pozostałe": 0.02298}},
     "Tauron": {"B21": {"całodobowa": 0.07114}, "B22": {"szczyt": 0.07243, "pozaszczyt": 0.05042}, "B23": {"przedpołudnie": 0.04964, "popołudnie": 0.05610, "pozostałe": 0.03748}},
     "Enea": {"B21": {"całodobowa": 0.06820}, "B22": {"szczyt": 0.08940, "pozaszczyt": 0.04210}, "B23": {"przedpołudnie": 0.07120, "popołudnie": 1.12850, "pozostałe": 0.02050}},
-    "Stoen": {"B21": {"całodobowa": 0.06150}, "B22": {"szczyt": 0.08230, "pozaszczyt": 0.03840}, "B23": {"przedpołudnie": 0.06420, "popołudnie": 0.11980, "pozostałe": 0.01820}}
+    "Stoen": {"B21": {"całodobowa": 0.06150}, "B22": {"szczyt": 0.08230, "pozaszczyt": 0.03840}, "B23": {"przedpołudnie": 0.06420, "popołudnie": 1.11980, "pozostałe": 0.01820}}
 }
 
 # --- PANEL BOCZNY ---
-st.sidebar.header("⚙️ Ustawienia")
+st.sidebar.header("⚙️ Konfiguracja")
 data_type = st.sidebar.radio("Typ danych:", ["15-minutowe", "Godzinowe"])
 osd_choice = st.sidebar.selectbox("Operator OSD", list(osd_data.keys()))
 taryfa_choice = st.sidebar.selectbox("Taryfa", ["B21", "B22", "B23"])
@@ -104,21 +104,15 @@ moc_pre = df.groupby('Data_Klucz').apply(lambda x: get_moc_daily(x, 'Pobór'))
 # --- PANEL METRYK (NA GÓRZE) ---
 st.subheader("⚡ Szybki Przegląd Profilu (Licznik kWh)")
 c1, c2, c3, c4 = st.columns(4)
-
-# Obliczenia do metryk
 sz_pre_total = df[df['Is_Szczyt_Mocowy']]['Pobór'].sum()
 psz_pre_total = df[~df['Is_Szczyt_Mocowy']]['Pobór'].sum()
 sz_po_total = df[df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
 psz_po_total = df[~df['Is_Szczyt_Mocowy']]['Nowy_Pobór'].sum()
 
-with c1:
-    st.metric("Szczyt PRZED PV", f"{sz_pre_total/1000:,.0f} MWh", help="Godziny 7:00-22:00 w dni robocze")
-with c2:
-    st.metric("Poza szczytem PRZED PV", f"{psz_pre_total/1000:,.0f} MWh", help="Noce, weekendy i święta")
-with c3:
-    st.metric("Szczyt PO PV", f"{sz_po_total/1000:,.0f} MWh", delta=f"-{(sz_pre_total-sz_po_total)/1000:,.0f}", delta_color="normal")
-with c4:
-    st.metric("Poza szczytem PO PV", f"{psz_po_total/1000:,.0f} MWh", help="Niezmienne (PV nie pracuje w nocy)")
+with c1: st.metric("Szczyt PRZED PV", f"{sz_pre_total/1000:,.0f} MWh")
+with c2: st.metric("Poza szczytem PRZED PV", f"{psz_pre_total/1000:,.0f} MWh")
+with c3: st.metric("Szczyt PO PV", f"{sz_po_total/1000:,.0f} MWh", delta=f"-{(sz_pre_total-sz_po_total)/1000:,.0f}")
+with c4: st.metric("Poza szczytem PO PV", f"{psz_po_total/1000:,.0f} MWh")
 
 # --- FINANSE ---
 def get_strefa(row):
@@ -161,9 +155,17 @@ fig.add_trace(go.Bar(x=m_plot['Etykieta_Miesiac'], y=m_plot['Autokonsumpcja'], n
 fig.update_layout(barmode='group', template="plotly_white", title="Chronologiczny Bilans Energii [kWh]")
 st.plotly_chart(fig, use_container_width=True)
 
-# KATEGORIE
+# --- KATEGORIE MOCOWE + ZASTRZEŻENIE ---
 st.markdown("---")
 st.subheader("🧐 Rozkład kategorii mocowych (Dni w miesiącu)")
+
+# TWOJE ZASTRZEŻENIE:
+st.warning("""
+**Ważna uwaga informacyjna:**
+Gdyby Twój profil poboru wyglądał tak samo w roku 2026 jak na wgranych danych historycznych, to w takich kategoriach opłaty mocowej powinieneś się znaleźć i uzyskiwać takie współczynniki kategorii opłaty mocowej. 
+Należy jednak pamiętać, że powyższe dane mają charakter symulacji. Rzeczywiste wyniki rozliczeń będą zależały od Twojego faktycznego profilu poboru energii w przyszłości oraz ewentualnych zmian w trybie pracy zakładu.
+""")
+
 stats_df = moc_po.copy().reset_index()
 stats_df['Rok_Miesiac'] = pd.to_datetime(stats_df['Data_Klucz']).dt.to_period('M')
 dist = stats_df.groupby(['Rok_Miesiac', 'Mnożnik']).size().unstack(fill_value=0)
@@ -177,8 +179,7 @@ st.table((dist.div(dist.sum(axis=1), axis=0) * 100).style.format("{:.1f}%"))
 st.markdown("---")
 st.subheader("📝 Komentarz Eksperta")
 st.success(f"""
-* **Profil pracy:** Klient pobiera rocznie **{sz_pre_total/1000:,.1f} MWh** w szczycie oraz **{psz_pre_total/1000:,.1f} MWh** poza szczytem. 
 * **Wpływ PV:** Fotowoltaika {moc_pv} kWp zredukowała pobór w szczycie o **{((sz_pre_total-sz_po_total)/sz_pre_total)*100:.1f}%**.
-* **Opłata Mocowa:** Dzięki płaskiemu profilowi 24/7 i wsparciu PV, średni współczynnik L spadł do **{moc_po['L'].mean()*100:.2f}%**, co gwarantuje utrzymanie najniższej stawki K1 (0,17).
-* **Zysk całkowity:** Inwestycja generuje **{z_total:,.2f} PLN** oszczędności rocznie na samych opłatach zmiennych.
+* **Opłata Mocowa:** Dzięki płaskiemu profilowi 24/7 i wsparciu PV, średni współczynnik L spadł do **{moc_po['L'].mean()*100:.2f}%**.
+* **Zysk całkowity:** Inwestycja generuje szacunkowo **{z_total:,.2f} PLN** oszczędności rocznie.
 """)
