@@ -84,7 +84,7 @@ df['Generacja_PV'] = (df['Gen_Raw'] / df['Gen_Raw'].sum()) * (moc_pv * uzysk * (
 df['Autokonsumpcja'] = np.minimum(df['Pobór'], df['Generacja_PV'])
 df['Nowy_Pobór'] = np.maximum(0, df['Pobór'] - df['Autokonsumpcja'])
 
-# Opłata Mocowa (Rozbudowana pod raport dobowy)
+# Opłata Mocowa (Zredukowany Szczyt ZAWSZE promuje zniżkę)
 df['Is_Szczyt_Mocowy'] = (df['Godzina'] >= 7) & (df['Godzina'] < 22) & df['Roboczy']
 
 def get_moc_daily_detailed(sub_df, col):
@@ -133,11 +133,18 @@ sum_pre = moc_pre.groupby('Mnożnik_R')[['Szczyt [kWh]', 'Koszt [PLN]']].sum()
 sum_po = moc_po.groupby('Mnożnik_R')[['Szczyt [kWh]', 'Koszt [PLN]']].sum()
 
 summary_cat_data = []
+tot_vol_pre = tot_cost_pre = tot_vol_po = tot_cost_po = 0.0
+
 for mn, cat_name in cat_map.items():
     vol_pre = sum_pre.loc[mn, 'Szczyt [kWh]'] / 1000 if mn in sum_pre.index else 0.0
     cost_pre = sum_pre.loc[mn, 'Koszt [PLN]'] if mn in sum_pre.index else 0.0
     vol_po = sum_po.loc[mn, 'Szczyt [kWh]'] / 1000 if mn in sum_po.index else 0.0
     cost_po = sum_po.loc[mn, 'Koszt [PLN]'] if mn in sum_po.index else 0.0
+    
+    tot_vol_pre += vol_pre
+    tot_cost_pre += cost_pre
+    tot_vol_po += vol_po
+    tot_cost_po += cost_po
     
     summary_cat_data.append({
         "Kategoria": cat_name,
@@ -145,8 +152,18 @@ for mn, cat_name in cat_map.items():
         "Koszt PRZED [PLN]": cost_pre,
         "Wolumen PO PV [MWh]": vol_po,
         "Koszt PO PV [PLN]": cost_po,
-        "ZYSK [PLN]": cost_pre - cost_po
+        "Zysk w grupie [PLN]": cost_pre - cost_po
     })
+
+# Dodanie wiersza podsumowującego
+summary_cat_data.append({
+    "Kategoria": "SUMA (CAŁY ROK)",
+    "Wolumen PRZED [MWh]": tot_vol_pre,
+    "Koszt PRZED [PLN]": tot_cost_pre,
+    "Wolumen PO PV [MWh]": tot_vol_po,
+    "Koszt PO PV [PLN]": tot_cost_po,
+    "Zysk w grupie [PLN]": tot_cost_pre - tot_cost_po
+})
 df_cat_summary = pd.DataFrame(summary_cat_data).set_index("Kategoria")
 
 # Przygotowanie pełnej tabeli dobowej
@@ -192,7 +209,6 @@ with tab1:
     st.subheader("📝 Komentarz Eksperta")
     st.success(f"""
     * **Wpływ PV:** Fotowoltaika {moc_pv} kWp zredukowała zakup energii w szczycie o **{((sz_pre-sz_po)/sz_pre)*100:.1f}%**.
-    * **Opłata Mocowa:** Dzięki stabilnemu profilowi i redukcji szczytów przez PV, średni współczynnik L spadł i gwarantuje stabilizację kosztów.
     * **Wynik finansowy:** Całkowity zysk netto z inwestycji (oszczędność kosztów) wynosi **{z_total:,.2f} PLN** rocznie.
     """)
 
@@ -219,18 +235,20 @@ with tab2:
 
 with tab3:
     st.subheader("📊 Podsumowanie Opłaty Mocowej w podziale na Kategorie (K1-K4)")
-    st.write("Łączny wolumen (MWh) pobrany w godzinach szczytowych przypisany do konkretnej grupy oraz łączny koszt z tym związany.")
+    st.info("💡 **Skąd mogą brać się wartości ujemne w rubryce 'Zysk w grupie'?** Jeśli po instalacji PV więcej dni przeniesie się np. z drogiej grupy K4 do taniej K1, to koszt naturalnie wzrośnie w K1 (zjawisko pozytywne!), a spadnie w K4. **Kluczowy jest łączny zysk z wiersza SUMA (CAŁY ROK).**")
+    
+    # Podświetlamy wiersz sumy na inny kolor, żeby nikt go nie przegapił
     st.table(df_cat_summary.style.format({
         "Wolumen PRZED [MWh]": "{:,.2f}",
         "Koszt PRZED [PLN]": "{:,.2f}",
         "Wolumen PO PV [MWh]": "{:,.2f}",
         "Koszt PO PV [PLN]": "{:,.2f}",
-        "ZYSK [PLN]": "{:,.2f}"
-    }))
+        "Zysk w grupie [PLN]": "{:,.2f}"
+    }).apply(lambda x: ['background-color: #D7E4BC; font-weight: bold' if x.name == 'SUMA (CAŁY ROK)' else '' for i in x], axis=1))
 
     st.markdown("---")
     st.subheader("📅 Szczegółowy Raport Dobowy")
-    st.write("Poniższa tabela przedstawia kalkulację dla **każdego dnia roboczego**. Możesz przeanalizować, jak fotowoltaika zmienia relację szczytu do pozaszczytu (wskaźnik L) i jak to wpływa na realny, dzienny koszt opłaty mocowej w PLN.")
+    st.write("Możesz przeanalizować, jak fotowoltaika zmienia relację szczytu do pozaszczytu (wskaźnik L) w danej dobie.")
     st.dataframe(detailed_daily_df.style.format({
         'Szczyt PRZED [kWh]': "{:,.0f}", 'PozaSzcz. PRZED [kWh]': "{:,.0f}",
         'Szczyt PO PV [kWh]': "{:,.0f}", 'PozaSzcz. PO PV [kWh]': "{:,.0f}",
@@ -262,6 +280,7 @@ def create_excel(df_fin, df_cat_sum, df_daily):
         pct_fmt = workbook.add_format({'num_format': '0.00%', 'border': 1})
         num_fmt = workbook.add_format({'num_format': '#,##0', 'border': 1})
         vol_fmt = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
+        sum_row_fmt = workbook.add_format({'bold': True, 'bg_color': '#E2EFDA', 'border': 1})
         
         # Formatowanie Podsumowanie
         for col_num, value in enumerate(df_fin.columns.values):
@@ -279,18 +298,20 @@ def create_excel(df_fin, df_cat_sum, df_daily):
         ws_dobowy.set_column('C:C', 20, money_fmt)
         ws_dobowy.set_column('D:D', 20, vol_fmt)
         ws_dobowy.set_column('E:F', 20, money_fmt)
+        
+        # Oznaczenie wiersza SUMA na zielono w Excelu
+        for col_num in range(6):
+            ws_dobowy.write(len(df_cat_sum), col_num, df_cat_sum.reset_index().iloc[-1, col_num], sum_row_fmt)
 
         # Formatowanie Raport Dobowy - Tabela Szczegółowa (Dół)
         for col_num, value in enumerate(df_daily.columns.values):
             ws_dobowy.write(start_row_daily, col_num + 1, value, header_fmt)
         ws_dobowy.write(start_row_daily, 0, 'Data', header_fmt)
         ws_dobowy.set_column('A:A', 15)
-        
-        # Kolumny od G (L PRZED)
-        ws_dobowy.set_column('F:I', 20, num_fmt) # Szczyt / Poza Szczytem
-        ws_dobowy.set_column('J:K', 15, pct_fmt) # L %
-        ws_dobowy.set_column('L:M', 15) # Mnożnik
-        ws_dobowy.set_column('N:P', 20, money_fmt) # Koszty i Zysk
+        ws_dobowy.set_column('F:I', 20, num_fmt) 
+        ws_dobowy.set_column('J:K', 15, pct_fmt) 
+        ws_dobowy.set_column('L:M', 15) 
+        ws_dobowy.set_column('N:P', 20, money_fmt)
 
     return output.getvalue()
 
