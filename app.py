@@ -235,7 +235,14 @@ with tab2:
 
 with tab3:
     st.subheader("📊 Podsumowanie Opłaty Mocowej w podziale na Kategorie (K1-K4)")
-    st.info("💡 **Skąd mogą brać się wartości ujemne w rubryce 'Zysk w grupie'?** Jeśli po instalacji PV więcej dni przeniesie się np. z drogiej grupy K4 do taniej K1, to koszt naturalnie wzrośnie w K1 (zjawisko pozytywne!), a spadnie w K4. **Kluczowy jest łączny zysk z wiersza SUMA (CAŁY ROK).**")
+    
+    # NOWY, PRO-KLIENCKI KOMUNIKAT:
+    st.info("""
+    💡 **Dlaczego w najtańszej kategorii (np. K1) może pojawić się 'minus' w rubryce Zysk?**
+    To doskonała wiadomość! Ten minus oznacza po prostu **przeniesienie się większej ilości dni i ujętych w nich kWh z 'drogich stref' (np. K4) do strefy najtańszej (K1)**. 
+    Fotowoltaika obcina Twoje szczyty zużycia, dlatego za energię, za którą wcześniej płaciłeś 100% opłaty mocowej, teraz płacisz tylko 17%. Sumaryczny koszt w samej grupie K1 rośnie (bo jest tam teraz więcej dni), ale Twój łączny rachunek drastycznie spada. 
+    **Dlatego zawsze patrz na ostateczny zysk w zielonym wierszu SUMA (CAŁY ROK).**
+    """)
     
     # Podświetlamy wiersz sumy na inny kolor, żeby nikt go nie przegapił
     st.table(df_cat_summary.style.format({
