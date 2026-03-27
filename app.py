@@ -124,6 +124,31 @@ e_n, d_n = calc_all('Nowy_Pobór')
 total_m_pre, total_m_po = moc_pre['Koszt [PLN]'].sum(), moc_po['Koszt [PLN]'].sum()
 z_total = (e_p + d_p + total_m_pre) - (e_n + d_n + total_m_po)
 
+# --- PRZYGOTOWANIE DANYCH AGREGACJI (PODSUMOWANIE KATEGORII K1-K4) ---
+cat_map = {0.17: 'K1 (0.17)', 0.50: 'K2 (0.50)', 0.83: 'K3 (0.83)', 1.00: 'K4 (1.00)'}
+moc_pre['Mnożnik_R'] = moc_pre['Mnożnik'].round(2)
+moc_po['Mnożnik_R'] = moc_po['Mnożnik'].round(2)
+
+sum_pre = moc_pre.groupby('Mnożnik_R')[['Szczyt [kWh]', 'Koszt [PLN]']].sum()
+sum_po = moc_po.groupby('Mnożnik_R')[['Szczyt [kWh]', 'Koszt [PLN]']].sum()
+
+summary_cat_data = []
+for mn, cat_name in cat_map.items():
+    vol_pre = sum_pre.loc[mn, 'Szczyt [kWh]'] / 1000 if mn in sum_pre.index else 0.0
+    cost_pre = sum_pre.loc[mn, 'Koszt [PLN]'] if mn in sum_pre.index else 0.0
+    vol_po = sum_po.loc[mn, 'Szczyt [kWh]'] / 1000 if mn in sum_po.index else 0.0
+    cost_po = sum_po.loc[mn, 'Koszt [PLN]'] if mn in sum_po.index else 0.0
+    
+    summary_cat_data.append({
+        "Kategoria": cat_name,
+        "Wolumen PRZED [MWh]": vol_pre,
+        "Koszt PRZED [PLN]": cost_pre,
+        "Wolumen PO PV [MWh]": vol_po,
+        "Koszt PO PV [PLN]": cost_po,
+        "ZYSK [PLN]": cost_pre - cost_po
+    })
+df_cat_summary = pd.DataFrame(summary_cat_data).set_index("Kategoria")
+
 # Przygotowanie pełnej tabeli dobowej
 detailed_daily_df = pd.DataFrame({
     'Data': moc_pre.index,
@@ -193,7 +218,18 @@ with tab2:
     st.table((dist.div(dist.sum(axis=1), axis=0) * 100).style.format("{:.1f}%"))
 
 with tab3:
-    st.subheader("📅 Szczegółowy Raport Dobowy - Opłata Mocowa")
+    st.subheader("📊 Podsumowanie Opłaty Mocowej w podziale na Kategorie (K1-K4)")
+    st.write("Łączny wolumen (MWh) pobrany w godzinach szczytowych przypisany do konkretnej grupy oraz łączny koszt z tym związany.")
+    st.table(df_cat_summary.style.format({
+        "Wolumen PRZED [MWh]": "{:,.2f}",
+        "Koszt PRZED [PLN]": "{:,.2f}",
+        "Wolumen PO PV [MWh]": "{:,.2f}",
+        "Koszt PO PV [PLN]": "{:,.2f}",
+        "ZYSK [PLN]": "{:,.2f}"
+    }))
+
+    st.markdown("---")
+    st.subheader("📅 Szczegółowy Raport Dobowy")
     st.write("Poniższa tabela przedstawia kalkulację dla **każdego dnia roboczego**. Możesz przeanalizować, jak fotowoltaika zmienia relację szczytu do pozaszczytu (wskaźnik L) i jak to wpływa na realny, dzienny koszt opłaty mocowej w PLN.")
     st.dataframe(detailed_daily_df.style.format({
         'Szczyt PRZED [kWh]': "{:,.0f}", 'PozaSzcz. PRZED [kWh]': "{:,.0f}",
@@ -203,13 +239,18 @@ with tab3:
         'Koszt PRZED [PLN]': "{:,.2f}", 'Koszt PO PV [PLN]': "{:,.2f}", 'Zysk Opłata Moc. [PLN]': "{:,.2f}"
     }), height=600, use_container_width=True)
 
-
 # --- EKSPORT DO EXCELA ---
-def create_excel(df_fin, df_daily):
+def create_excel(df_fin, df_cat_sum, df_daily):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_fin.to_excel(writer, sheet_name='Podsumowanie')
-        df_daily.to_excel(writer, sheet_name='Raport Dobowy (Mocowa)')
+        
+        # Zapis podsumowania kategorii K1-K4
+        df_cat_sum.to_excel(writer, sheet_name='Raport Dobowy (Mocowa)', startrow=0, startcol=0)
+        
+        # Zapis szczegółów dobowych poniżej
+        start_row_daily = len(df_cat_sum) + 3 
+        df_daily.to_excel(writer, sheet_name='Raport Dobowy (Mocowa)', startrow=start_row_daily, startcol=0)
         
         workbook = writer.book
         ws_podsumowanie = writer.sheets['Podsumowanie']
@@ -220,6 +261,7 @@ def create_excel(df_fin, df_daily):
         money_fmt = workbook.add_format({'num_format': '#,##0.00 PLN', 'border': 1})
         pct_fmt = workbook.add_format({'num_format': '0.00%', 'border': 1})
         num_fmt = workbook.add_format({'num_format': '#,##0', 'border': 1})
+        vol_fmt = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
         
         # Formatowanie Podsumowanie
         for col_num, value in enumerate(df_fin.columns.values):
@@ -229,22 +271,33 @@ def create_excel(df_fin, df_daily):
         ws_podsumowanie.set_column('A:A', 25)
         ws_podsumowanie.set_column('B:E', 20, money_fmt)
         
-        # Formatowanie Raport Dobowy
-        for col_num, value in enumerate(df_daily.columns.values):
+        # Formatowanie Raport Dobowy - Tabela Kategorii (Góra)
+        for col_num, value in enumerate(df_cat_sum.columns.values):
             ws_dobowy.write(0, col_num + 1, value, header_fmt)
-        ws_dobowy.write(0, 0, 'Data', header_fmt)
+        ws_dobowy.write(0, 0, 'Kategoria', header_fmt)
+        ws_dobowy.set_column('B:B', 20, vol_fmt)
+        ws_dobowy.set_column('C:C', 20, money_fmt)
+        ws_dobowy.set_column('D:D', 20, vol_fmt)
+        ws_dobowy.set_column('E:F', 20, money_fmt)
+
+        # Formatowanie Raport Dobowy - Tabela Szczegółowa (Dół)
+        for col_num, value in enumerate(df_daily.columns.values):
+            ws_dobowy.write(start_row_daily, col_num + 1, value, header_fmt)
+        ws_dobowy.write(start_row_daily, 0, 'Data', header_fmt)
         ws_dobowy.set_column('A:A', 15)
-        ws_dobowy.set_column('B:E', 20, num_fmt)
-        ws_dobowy.set_column('F:G', 15, pct_fmt)
-        ws_dobowy.set_column('H:I', 15)
-        ws_dobowy.set_column('J:L', 20, money_fmt)
+        
+        # Kolumny od G (L PRZED)
+        ws_dobowy.set_column('F:I', 20, num_fmt) # Szczyt / Poza Szczytem
+        ws_dobowy.set_column('J:K', 15, pct_fmt) # L %
+        ws_dobowy.set_column('L:M', 15) # Mnożnik
+        ws_dobowy.set_column('N:P', 20, money_fmt) # Koszty i Zysk
 
     return output.getvalue()
 
 st.sidebar.markdown("---")
 st.sidebar.download_button(
     label="📥 Pobierz pełny raport Excel",
-    data=create_excel(main_res, detailed_daily_df),
+    data=create_excel(main_res, df_cat_summary, detailed_daily_df),
     file_name=f"Raport_PV_{osd_choice}_{taryfa_choice}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
